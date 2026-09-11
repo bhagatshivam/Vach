@@ -27,6 +27,7 @@ interface LibraryFolderPlugin {
   pickFiles(): Promise<{ uris: string[] }>;
   scanFolder(options: { uri: string }): Promise<{ name: string; files: LibraryFile[] }>;
   statFile(options: { uri: string }): Promise<{ file: LibraryFile }>;
+  readFile(options: { uri: string }): Promise<{ base64: string }>;
   hasPersistedPermission(options: { uri: string }): Promise<{ granted: boolean }>;
 }
 
@@ -161,4 +162,10 @@ export async function scanAllSources(): Promise<LibraryScanResult> {
     sources: valid.map(({ source, displayName }) => ({ source, displayName })),
     files: Array.from(fileMap.values()),
   };
+}
+
+export async function readFileBase64(uri: string): Promise<string> {
+  console.log(LOG_TAG, 'readFileBase64:', uri);
+  const { base64 } = await LibraryFolder.readFile({ uri });
+  return base64;
 }

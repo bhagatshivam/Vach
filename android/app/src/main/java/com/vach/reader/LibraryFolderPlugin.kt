@@ -3,6 +3,7 @@ package com.vach.reader
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
+import android.util.Base64
 import android.util.Log
 import androidx.activity.result.ActivityResult
 import androidx.documentfile.provider.DocumentFile
@@ -218,6 +219,34 @@ class LibraryFolderPlugin : Plugin() {
         val ret = JSObject()
         ret.put("file", file)
         call.resolve(ret)
+    }
+
+    @PluginMethod
+    fun readFile(call: PluginCall) {
+        val uriString = call.getString("uri")
+        Log.d(TAG, "readFile() uri=$uriString")
+        if (uriString == null) {
+            call.reject("Missing 'uri' parameter")
+            return
+        }
+
+        val uri = Uri.parse(uriString)
+        try {
+            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            if (bytes == null) {
+                Log.e(TAG, "readFile() openInputStream returned null for $uriString")
+                call.reject("Could not open file for reading")
+                return
+            }
+            Log.d(TAG, "readFile() read ${bytes.size} byte(s), encoding to base64")
+
+            val ret = JSObject()
+            ret.put("base64", Base64.encodeToString(bytes, Base64.NO_WRAP))
+            call.resolve(ret)
+        } catch (e: Exception) {
+            Log.e(TAG, "readFile() failed for $uriString", e)
+            call.reject("Failed to read file: ${e.message}", e)
+        }
     }
 
     @PluginMethod
