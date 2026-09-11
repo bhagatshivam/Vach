@@ -1,0 +1,77 @@
+.library {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.library h1 {
+  margin: 0;
+  font-size: 32px;
+}
+
+.status {
+  color: var(--text);
+  opacity: 0.7;
+}
+
+.error {
+  color: var(--danger);
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.actions button {
+  padding: 10px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--accent);
+  color: #fff;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.actions button:last-child {
+  background: transparent;
+  color: var(--text);
+}
+
+.folder-uri {
+  font-size: 13px;
+  opacity: 0.6;
+  word-break: break-all;
+}
+
+.file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.file-list li {
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.file-name {
+  font-weight: 600;
+}
+
+.file-path {
+  font-size: 12px;
+  opacity: 0.6;
+  word-break: break-all;
+}
+
+.empty {
+  opacity: 0.6;
+}
