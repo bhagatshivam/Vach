@@ -122,6 +122,11 @@ function extractTitle(opfXml: string): string | null {
  *   could navigate the WebView somewhere broken.
  * - on* event handler attributes removed.
  * - <img src> rewritten to the pre-extracted data: URI for that image.
+ * - SVG-wrapped images (<svg><image xlink:href="..."/></svg>, the
+ *   standard cover-page/full-bleed-illustration pattern from Calibre,
+ *   Sigil, and most other EPUB tools) get the same src-rewriting
+ *   treatment via whichever of xlink:href/href they carry - <img> alone
+ *   missed this entirely, leaving covers built this way blank.
  * - inline style attributes kept, but with font/color/background
  *   properties stripped out (those are exactly the properties our own
  *   theme/font controls need to own).
@@ -144,6 +149,24 @@ function sanitizeChapterHtml(rawHtml: string, chapterDir: string, imageDataUris:
       img.setAttribute('src', dataUri);
     } else {
       img.removeAttribute('src');
+    }
+  });
+
+  // querySelectorAll('image') only ever matches SVG <image> elements -
+  // "image" isn't a valid HTML tag name, so there's no risk of matching
+  // something else. SVG <image> can carry either the legacy xlink:href or
+  // the SVG2 plain href; whichever is present gets rewritten the same way.
+  doc.querySelectorAll('image').forEach((image) => {
+    const attrName = image.hasAttribute('xlink:href') ? 'xlink:href' : image.hasAttribute('href') ? 'href' : null;
+    if (!attrName) return;
+    const href = image.getAttribute(attrName);
+    if (!href) return;
+    const resolved = resolveRelativePath(chapterDir, href);
+    const dataUri = imageDataUris.get(resolved);
+    if (dataUri) {
+      image.setAttribute(attrName, dataUri);
+    } else {
+      image.removeAttribute(attrName);
     }
   });
 
