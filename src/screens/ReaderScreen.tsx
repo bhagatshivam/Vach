@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { readFileBase64, type LibraryFile } from '../lib/libraryFolder';
-import { parseEpub, type ParsedEpub } from '../lib/epub';
 import {
   DEFAULT_READER_SETTINGS,
   FONT_FAMILY_OPTIONS,
@@ -17,6 +16,28 @@ interface ReaderScreenProps {
   onBack: () => void;
 }
 
+// epub.ts and pdf.ts intentionally produce this identical shape - a title
+// plus an ordered list of already-sanitized chapter HTML strings - so
+// everything below (rendering, fonts, themes, auto-hide nav) is written
+// once and works for both formats without a fork.
+interface ParsedBook {
+  title: string;
+  chaptersHtml: string[];
+}
+
+// Dynamic imports here, not static ones: pdf.js (~2.2MB worker alone) and
+// jszip only need to load when a book of that actual format is opened, not
+// as part of the app's initial bundle every time - the production build
+// flagged the combined bundle size once pdf.js was added statically.
+async function parseBook(base64: string, fileName: string): Promise<ParsedBook> {
+  if (fileName.toLowerCase().endsWith('.pdf')) {
+    const { parsePdf } = await import('../lib/pdf');
+    return parsePdf(base64, fileName);
+  }
+  const { parseEpub } = await import('../lib/epub');
+  return parseEpub(base64, fileName);
+}
+
 const FONT_SIZE_MIN = 14;
 const FONT_SIZE_MAX = 28;
 const LINE_HEIGHT_MIN = 1.2;
@@ -25,7 +46,7 @@ const NAV_IDLE_MS = 3000;
 
 export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
   const [settings, setSettings] = useState<ReaderSettings>(DEFAULT_READER_SETTINGS);
-  const [epub, setEpub] = useState<ParsedEpub | null>(null);
+  const [book, setBook] = useState<ParsedBook | null>(null);
   const [status, setStatus] = useState('Loading...');
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
@@ -45,11 +66,11 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
       try {
         console.log('[ReaderScreen] load: reading file', file.uri);
         const base64 = await readFileBase64(file.uri);
-        console.log('[ReaderScreen] load: read', base64.length, 'base64 chars, parsing epub');
-        const parsed = await parseEpub(base64, file.name);
+        console.log('[ReaderScreen] load: read', base64.length, 'base64 chars, parsing', file.name);
+        const parsed = await parseBook(base64, file.name);
         if (cancelled) return;
         console.log('[ReaderScreen] load: parsed', parsed.chaptersHtml.length, 'chapter(s)');
-        setEpub(parsed);
+        setBook(parsed);
         setStatus('');
       } catch (err) {
         if (cancelled) return;
@@ -78,11 +99,11 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
   // actively adjusting would be a bad experience.
   useEffect(() => {
     clearIdleTimer();
-    if (navVisible && epub && !showSettings) {
+    if (navVisible && book && !showSettings) {
       idleTimerRef.current = setTimeout(() => setNavVisible(false), NAV_IDLE_MS);
     }
     return clearIdleTimer;
-  }, [navVisible, showSettings, epub, clearIdleTimer]);
+  }, [navVisible, showSettings, book, clearIdleTimer]);
 
   // Only attached to the reading content itself (see JSX below), never to the
   // header or settings panel - those are separate, visually-stacked-on-top
@@ -131,7 +152,7 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
         <button className="icon-button" onClick={onBack}>
           Back
         </button>
-        <span className="reader-title">{epub?.title ?? file.name}</span>
+        <span className="reader-title">{book?.title ?? file.name}</span>
         <button className="icon-button" onClick={toggleSettings}>
           Aa
         </button>
@@ -233,9 +254,9 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
       {status && <p className="status">{status}</p>}
       {error && <p className="error">{error}</p>}
 
-      {epub && (
+      {book && (
         <div className="reader-content" style={contentStyle} onClick={handleContentTap}>
-          {epub.chaptersHtml.map((html, i) => (
+          {book.chaptersHtml.map((html, i) => (
             <section key={i} className="chapter" dangerouslySetInnerHTML={{ __html: html }} />
           ))}
         </div>

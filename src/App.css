@@ -109,10 +109,6 @@
   opacity: 0.7;
 }
 
-.file-list li.unreadable {
-  opacity: 0.5;
-}
-
 .file-name {
   font-weight: 600;
 }
@@ -121,12 +117,6 @@
   font-size: 12px;
   opacity: 0.6;
   word-break: break-all;
-}
-
-.file-note {
-  font-size: 11px;
-  opacity: 0.8;
-  margin-top: 4px;
 }
 
 .empty {
@@ -270,4 +260,20 @@
 
 .reader-content p {
   margin: 0 0 1em;
+}
+
+.reader-content h2 {
+  margin: 0 0 0.75em;
+  font-size: 1.3em;
+}
+
+/* PDF milestone: a page with no extractable text (image-only - covers,
+   illustrations, scanned pages) gets this visible marker rather than
+   silently vanishing from the reading flow. Real image rendering for these
+   is Phase 3; this just avoids pretending nothing was skipped. */
+.reader-content .pdf-page-gap {
+  font-style: italic;
+  opacity: 0.55;
+  font-size: 0.9em;
+  text-align: center;
 }

@@ -12,10 +12,6 @@ interface LibraryScreenProps {
   onOpenBook: (file: LibraryFile) => void;
 }
 
-function isReadable(file: LibraryFile): boolean {
-  return file.name.toLowerCase().endsWith('.epub');
-}
-
 export default function LibraryScreen({ onOpenBook }: LibraryScreenProps) {
   const [sources, setSources] = useState<SourceInfo[]>([]);
   const [files, setFiles] = useState<LibraryFile[]>([]);
@@ -109,20 +105,12 @@ export default function LibraryScreen({ onOpenBook }: LibraryScreenProps) {
       <section>
         <h2>Library</h2>
         <ul className="file-list">
-          {files.map((file) => {
-            const readable = isReadable(file);
-            return (
-              <li
-                key={file.uri}
-                className={readable ? 'readable' : 'unreadable'}
-                onClick={readable ? () => onOpenBook(file) : undefined}
-              >
-                <span className="file-name">{file.name}</span>
-                <span className="file-path">{file.path}</span>
-                {!readable && <span className="file-note">PDF support coming soon</span>}
-              </li>
-            );
-          })}
+          {files.map((file) => (
+            <li key={file.uri} className="readable" onClick={() => onOpenBook(file)}>
+              <span className="file-name">{file.name}</span>
+              <span className="file-path">{file.path}</span>
+            </li>
+          ))}
         </ul>
 
         {sources.length > 0 && files.length === 0 && (
