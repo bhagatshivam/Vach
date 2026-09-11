@@ -38,4 +38,16 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      Belt-and-suspenders package-visibility declaration for the SAF folder
+      picker. ACTION_OPEN_DOCUMENT_TREE is documented as exempt from Android
+      11+ package-visibility filtering, but some OEM builds have been
+      inconsistent about honoring that exemption, so declare it explicitly.
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.OPEN_DOCUMENT_TREE" />
+        </intent>
+    </queries>
 </manifest>

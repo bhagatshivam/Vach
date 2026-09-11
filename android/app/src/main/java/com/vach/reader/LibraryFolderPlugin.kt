@@ -1,5 +1,6 @@
 package com.vach.reader
 
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.util.Log
@@ -30,17 +31,21 @@ class LibraryFolderPlugin : Plugin() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
         }
+        Log.d(TAG, "pickFolder() built intent action=${intent.action}")
 
-        if (intent.resolveActivity(context.packageManager) == null) {
-            Log.e(TAG, "pickFolder() no activity resolves ACTION_OPEN_DOCUMENT_TREE on this device")
-            call.reject("No app available on this device to pick a folder")
-            return
-        }
-
+        // Deliberately no resolveActivity() pre-check here: it returns null
+        // not only when nothing can handle the intent, but also when *multiple*
+        // apps can (Files, Drive, an OEM file manager, ...) and the user hasn't
+        // set a default — which is the common case on a real device. Attempt
+        // the launch directly and only treat an actual ActivityNotFoundException
+        // as "nothing can handle this".
         try {
-            Log.d(TAG, "pickFolder() resolveActivity ok, calling startActivityForResult")
+            Log.d(TAG, "pickFolder() calling startActivityForResult")
             startActivityForResult(call, intent, "handleFolderPicked")
             Log.d(TAG, "pickFolder() startActivityForResult returned (launcher.launch invoked)")
+        } catch (e: ActivityNotFoundException) {
+            Log.e(TAG, "pickFolder() no activity found for ACTION_OPEN_DOCUMENT_TREE", e)
+            call.reject("No app available on this device to pick a folder", e)
         } catch (e: Exception) {
             Log.e(TAG, "pickFolder() threw while launching picker", e)
             call.reject("Failed to launch folder picker: ${e.message}", e)
