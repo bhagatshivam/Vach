@@ -281,3 +281,24 @@
   font-size: 0.9em;
   text-align: center;
 }
+
+/* Progressive-loading milestone: shown a chapter/page failed to parse
+   (per-chapter error isolation) so one bad chapter doesn't take down the
+   rest of the book. */
+.reader-content .chapter-error {
+  font-style: italic;
+  opacity: 0.55;
+  font-size: 0.9em;
+  text-align: center;
+}
+
+/* Shown at the end of currently-available content while the rest of the
+   book is still streaming in the background - an infinite-scroll style
+   indicator, not a hard wall, so scrolling ahead of the parser never looks
+   like a frozen app. */
+.loading-more {
+  opacity: 0.55;
+  font-size: 0.9em;
+  text-align: center;
+  padding: 24px 0;
+}

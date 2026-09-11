@@ -19,23 +19,33 @@ interface ReaderScreenProps {
 // epub.ts and pdf.ts intentionally produce this identical shape - a title
 // plus an ordered list of already-sanitized chapter HTML strings - so
 // everything below (rendering, fonts, themes, auto-hide nav) is written
-// once and works for both formats without a fork.
+// once and works for both formats without a fork. isComplete is false
+// while chapters are still streaming in behind the ones already shown.
 interface ParsedBook {
   title: string;
   chaptersHtml: string[];
+  isComplete: boolean;
 }
+
+// The first few chapters are buffered and revealed together so the reader
+// opens on a fuller screen instead of a single short chapter; everything
+// after that streams in one chapter at a time in the background.
+const INITIAL_CHAPTER_BATCH = 4;
 
 // Dynamic imports here, not static ones: pdf.js (~2.2MB worker alone) and
 // jszip only need to load when a book of that actual format is opened, not
 // as part of the app's initial bundle every time - the production build
-// flagged the combined bundle size once pdf.js was added statically.
-async function parseBook(base64: string, fileName: string): Promise<ParsedBook> {
+// flagged the combined bundle size once pdf.js was added statically. The
+// dynamic import happens inside the generator body, so it still only runs
+// once the generator is actually iterated, not merely constructed.
+async function* streamBook(base64: string, fileName: string) {
   if (fileName.toLowerCase().endsWith('.pdf')) {
-    const { parsePdf } = await import('../lib/pdf');
-    return parsePdf(base64, fileName);
+    const { streamPdf } = await import('../lib/pdf');
+    yield* streamPdf(base64, fileName);
+    return;
   }
-  const { parseEpub } = await import('../lib/epub');
-  return parseEpub(base64, fileName);
+  const { streamEpub } = await import('../lib/epub');
+  yield* streamEpub(base64, fileName);
 }
 
 const FONT_SIZE_MIN = 14;
@@ -59,19 +69,52 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
 
   useEffect(() => {
     let cancelled = false;
+    let generator: AsyncGenerator<{ type: 'title'; title: string } | { type: 'chapter'; html: string }> | null = null;
 
     async function load() {
       setStatus('Opening book...');
       setError(null);
+      setBook(null);
       try {
         console.log('[ReaderScreen] load: reading file', file.uri);
         const base64 = await readFileBase64(file.uri);
         console.log('[ReaderScreen] load: read', base64.length, 'base64 chars, parsing', file.name);
-        const parsed = await parseBook(base64, file.name);
+        setStatus('Parsing...');
+
+        generator = streamBook(base64, file.name);
+        let title = file.name;
+        const initialChapters: string[] = [];
+        let revealed = false;
+
+        for await (const event of generator) {
+          if (cancelled) return;
+          if (event.type === 'title') {
+            title = event.title;
+            continue;
+          }
+          if (!revealed) {
+            initialChapters.push(event.html);
+            if (initialChapters.length >= INITIAL_CHAPTER_BATCH) {
+              revealed = true;
+              console.log('[ReaderScreen] load: revealing first', initialChapters.length, 'chapter(s)');
+              setBook({ title, chaptersHtml: [...initialChapters], isComplete: false });
+              setStatus('');
+            }
+            continue;
+          }
+          setBook((prev) => (prev ? { ...prev, chaptersHtml: [...prev.chaptersHtml, event.html] } : prev));
+        }
+
         if (cancelled) return;
-        console.log('[ReaderScreen] load: parsed', parsed.chaptersHtml.length, 'chapter(s)');
-        setBook(parsed);
-        setStatus('');
+        console.log('[ReaderScreen] load: streaming complete');
+        if (revealed) {
+          setBook((prev) => (prev ? { ...prev, isComplete: true } : prev));
+        } else {
+          // Fewer chapters than INITIAL_CHAPTER_BATCH in the whole book -
+          // nothing was revealed yet, so show what we have as already complete.
+          setBook({ title, chaptersHtml: initialChapters, isComplete: true });
+          setStatus('');
+        }
       } catch (err) {
         if (cancelled) return;
         console.error('[ReaderScreen] load: failed', err);
@@ -83,6 +126,10 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
     load();
     return () => {
       cancelled = true;
+      // Signals the generator to stop at its next suspension point instead
+      // of continuing to parse chapters nobody will ever see, e.g. when the
+      // user backs out of a book mid-load.
+      generator?.return(undefined);
     };
   }, [file]);
 
@@ -259,6 +306,7 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
           {book.chaptersHtml.map((html, i) => (
             <section key={i} className="chapter" dangerouslySetInnerHTML={{ __html: html }} />
           ))}
+          {!book.isComplete && <p className="loading-more">Loading more…</p>}
         </div>
       )}
     </div>

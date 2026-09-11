@@ -1,9 +1,6 @@
 import JSZip from 'jszip';
 
-export interface ParsedEpub {
-  title: string;
-  chaptersHtml: string[];
-}
+export type ParseEvent = { type: 'title'; title: string } | { type: 'chapter'; html: string };
 
 const STRIPPED_INLINE_STYLE_PROPS = new Set([
   'font-family',
@@ -133,42 +130,51 @@ function extractTitle(opfXml: string): string | null {
  * The chapter's own <head> (its <link rel="stylesheet"> and <style>
  * tags) is discarded entirely by only reading .body - this is what stops
  * the EPUB's own CSS from ever being loaded in the first place.
+ *
+ * Images are resolved lazily via resolveImage rather than from a
+ * pre-built map: decompressing every image in the book up front (the
+ * original approach) was a real cost proportional to total images in the
+ * book, paid entirely before the first chapter could render. Resolving
+ * on demand, one chapter's worth of images at a time, is what lets the
+ * first chapter show up quickly for image-heavy books.
  */
-function sanitizeChapterHtml(rawHtml: string, chapterDir: string, imageDataUris: Map<string, string>): string {
+async function sanitizeChapterHtml(
+  rawHtml: string,
+  chapterDir: string,
+  resolveImage: (resolvedHref: string) => Promise<string | null>,
+): Promise<string> {
   const doc = new DOMParser().parseFromString(rawHtml, 'text/html');
 
   doc.querySelectorAll('script').forEach((el) => el.remove());
   doc.querySelectorAll('a[href]').forEach((a) => a.removeAttribute('href'));
 
-  doc.querySelectorAll('img').forEach((img) => {
+  for (const img of Array.from(doc.querySelectorAll('img'))) {
     const src = img.getAttribute('src');
-    if (!src) return;
-    const resolved = resolveRelativePath(chapterDir, src);
-    const dataUri = imageDataUris.get(resolved);
+    if (!src) continue;
+    const dataUri = await resolveImage(resolveRelativePath(chapterDir, src));
     if (dataUri) {
       img.setAttribute('src', dataUri);
     } else {
       img.removeAttribute('src');
     }
-  });
+  }
 
   // querySelectorAll('image') only ever matches SVG <image> elements -
   // "image" isn't a valid HTML tag name, so there's no risk of matching
   // something else. SVG <image> can carry either the legacy xlink:href or
   // the SVG2 plain href; whichever is present gets rewritten the same way.
-  doc.querySelectorAll('image').forEach((image) => {
+  for (const image of Array.from(doc.querySelectorAll('image'))) {
     const attrName = image.hasAttribute('xlink:href') ? 'xlink:href' : image.hasAttribute('href') ? 'href' : null;
-    if (!attrName) return;
+    if (!attrName) continue;
     const href = image.getAttribute(attrName);
-    if (!href) return;
-    const resolved = resolveRelativePath(chapterDir, href);
-    const dataUri = imageDataUris.get(resolved);
+    if (!href) continue;
+    const dataUri = await resolveImage(resolveRelativePath(chapterDir, href));
     if (dataUri) {
       image.setAttribute(attrName, dataUri);
     } else {
       image.removeAttribute(attrName);
     }
-  });
+  }
 
   doc.querySelectorAll('*').forEach((el) => {
     for (const attr of Array.from(el.attributes)) {
@@ -193,7 +199,14 @@ function sanitizeChapterHtml(rawHtml: string, chapterDir: string, imageDataUris:
   return doc.body?.innerHTML ?? '';
 }
 
-export async function parseEpub(base64: string, fallbackTitle: string): Promise<ParsedEpub> {
+/**
+ * Streams an EPUB's title and chapters as they become available, instead of
+ * fully parsing the book before returning anything. This lets ReaderScreen
+ * show the first chapters as soon as they're ready and keep loading the
+ * rest in the background - important for large books, where fully parsing
+ * every chapter (and, previously, every image) up front could take minutes.
+ */
+export async function* streamEpub(base64: string, fallbackTitle: string): AsyncGenerator<ParseEvent> {
   const zip = await JSZip.loadAsync(base64, { base64: true });
 
   const containerEntry = zip.file('META-INF/container.xml');
@@ -211,27 +224,49 @@ export async function parseEpub(base64: string, fallbackTitle: string): Promise<
 
   const { manifest, spineHrefs } = parseOpf(opfXml, opfDir);
   const title = extractTitle(opfXml) || fallbackTitle;
+  yield { type: 'title', title };
 
-  const imageDataUris = new Map<string, string>();
+  const manifestByHref = new Map<string, ManifestItem>();
   for (const item of manifest.values()) {
-    if (!item.mediaType.startsWith('image/')) continue;
-    const entry = zip.file(item.href);
-    if (!entry) continue;
-    const base64Data = await entry.async('base64');
-    imageDataUris.set(item.href, `data:${item.mediaType};base64,${base64Data}`);
+    manifestByHref.set(item.href, item);
   }
 
-  const chaptersHtml: string[] = [];
+  // Cached across chapters so an image shared by multiple chapters (a
+  // repeated decorative asset, say) is only decompressed once, while still
+  // never touching an image the current chapter doesn't reference.
+  const imageCache = new Map<string, string | null>();
+  async function resolveImage(resolvedHref: string): Promise<string | null> {
+    if (imageCache.has(resolvedHref)) return imageCache.get(resolvedHref) ?? null;
+    const item = manifestByHref.get(resolvedHref);
+    const entry = item?.mediaType.startsWith('image/') ? zip.file(resolvedHref) : null;
+    if (!entry) {
+      imageCache.set(resolvedHref, null);
+      return null;
+    }
+    const base64Data = await entry.async('base64');
+    const dataUri = `data:${item!.mediaType};base64,${base64Data}`;
+    imageCache.set(resolvedHref, dataUri);
+    return dataUri;
+  }
+
+  let emitted = 0;
   for (const href of spineHrefs) {
     const entry = zip.file(href);
     if (!entry) continue;
-    const rawHtml = await entry.async('string');
-    chaptersHtml.push(sanitizeChapterHtml(rawHtml, dirOf(href), imageDataUris));
+
+    let html: string;
+    try {
+      const rawHtml = await entry.async('string');
+      html = await sanitizeChapterHtml(rawHtml, dirOf(href), resolveImage);
+    } catch (err) {
+      console.error('[epub] failed to parse chapter', href, err);
+      html = '<p class="chapter-error">[This chapter could not be loaded]</p>';
+    }
+    emitted++;
+    yield { type: 'chapter', html };
   }
 
-  if (chaptersHtml.length === 0) {
+  if (emitted === 0) {
     throw new Error('No readable chapters found in this EPUB');
   }
-
-  return { title, chaptersHtml };
 }

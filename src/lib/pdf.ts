@@ -10,10 +10,7 @@ import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
-export interface ParsedPdf {
-  title: string;
-  chaptersHtml: string[];
-}
+export type ParseEvent = { type: 'title'; title: string } | { type: 'chapter'; html: string };
 
 interface PositionedTextItem {
   str: string;
@@ -125,7 +122,14 @@ function base64ToBytes(base64: string): Uint8Array {
   return bytes;
 }
 
-export async function parsePdf(base64: string, fallbackTitle: string): Promise<ParsedPdf> {
+/**
+ * Streams a PDF's title and pages as they're extracted, instead of fully
+ * extracting every page before returning anything - see streamEpub for why.
+ * pdf.js's own per-page getTextContent() calls were already incremental
+ * internally; the change here is emitting each page's reconstructed HTML
+ * the moment it's ready rather than collecting all of them first.
+ */
+export async function* streamPdf(base64: string, fallbackTitle: string): AsyncGenerator<ParseEvent> {
   const doc = await pdfjsLib.getDocument({ data: base64ToBytes(base64) }).promise;
 
   let title = fallbackTitle;
@@ -138,27 +142,32 @@ export async function parsePdf(base64: string, fallbackTitle: string): Promise<P
   } catch {
     // Metadata is optional - fall back to the file name silently.
   }
+  yield { type: 'title', title };
 
-  const chaptersHtml: string[] = [];
-  for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber++) {
-    const page = await doc.getPage(pageNumber);
-    const textContent = await page.getTextContent();
-    const items: PositionedTextItem[] = textContent.items.map((raw) => {
-      const item = raw as { str: string; transform: number[]; height: number; hasEOL?: boolean };
-      return {
-        str: item.str,
-        x: item.transform[4],
-        y: item.transform[5],
-        height: item.height,
-        hasEOL: item.hasEOL ?? false,
-      };
-    });
-    chaptersHtml.push(reconstructPage(items));
-  }
-
-  if (chaptersHtml.length === 0) {
+  if (doc.numPages === 0) {
     throw new Error('This PDF has no pages');
   }
 
-  return { title, chaptersHtml };
+  for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber++) {
+    let html: string;
+    try {
+      const page = await doc.getPage(pageNumber);
+      const textContent = await page.getTextContent();
+      const items: PositionedTextItem[] = textContent.items.map((raw) => {
+        const item = raw as { str: string; transform: number[]; height: number; hasEOL?: boolean };
+        return {
+          str: item.str,
+          x: item.transform[4],
+          y: item.transform[5],
+          height: item.height,
+          hasEOL: item.hasEOL ?? false,
+        };
+      });
+      html = reconstructPage(items);
+    } catch (err) {
+      console.error('[pdf] failed to parse page', pageNumber, err);
+      html = '<p class="chapter-error">[This page could not be loaded]</p>';
+    }
+    yield { type: 'chapter', html };
+  }
 }
