@@ -34,15 +34,54 @@
   cursor: pointer;
 }
 
-.actions button:last-child {
-  background: transparent;
-  color: var(--text);
+.library h2 {
+  margin: 0 0 8px;
+  font-size: 18px;
 }
 
-.folder-uri {
-  font-size: 13px;
+.source-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.source-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.source-badge {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
   opacity: 0.6;
-  word-break: break-all;
+  flex-shrink: 0;
+}
+
+.source-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remove-button {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
 }
 
 .file-list {

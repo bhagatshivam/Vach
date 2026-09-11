@@ -1,61 +1,73 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
-  clearSavedFolder,
-  pickAndSaveFolder,
-  scanSavedFolder,
+  addFileSources,
+  addFolderSource,
+  removeSource,
+  scanAllSources,
   type LibraryFile,
+  type SourceInfo,
 } from '../lib/libraryFolder';
 
 export default function LibraryScreen() {
-  const [folderUri, setFolderUri] = useState<string | null>(null);
+  const [sources, setSources] = useState<SourceInfo[]>([]);
   const [files, setFiles] = useState<LibraryFile[]>([]);
   const [status, setStatus] = useState('Loading...');
   const [error, setError] = useState<string | null>(null);
 
-  const loadSavedFolder = useCallback(async () => {
-    setStatus('Checking for a saved folder...');
+  const loadLibrary = useCallback(async () => {
+    setStatus('Scanning sources...');
     setError(null);
     try {
-      const result = await scanSavedFolder();
-      if (result) {
-        setFolderUri(result.uri);
-        setFiles(result.files);
-        setStatus(`Found ${result.files.length} file(s).`);
-      } else {
-        setFolderUri(null);
-        setFiles([]);
-        setStatus('No folder selected yet.');
-      }
+      const result = await scanAllSources();
+      setSources(result.sources);
+      setFiles(result.files);
+      setStatus(
+        result.sources.length === 0
+          ? 'No sources added yet.'
+          : `${result.sources.length} source(s), ${result.files.length} file(s).`,
+      );
     } catch (err) {
+      console.error('[LibraryScreen] loadLibrary: failed', err);
       setError(String(err));
-      setStatus('Failed to load saved folder.');
+      setStatus('Failed to load library.');
     }
   }, []);
 
   useEffect(() => {
-    loadSavedFolder();
-  }, [loadSavedFolder]);
+    loadLibrary();
+  }, [loadLibrary]);
 
-  async function handlePickFolder() {
-    console.log('[LibraryScreen] handlePickFolder: button tapped');
+  async function handleAddFolder() {
+    console.log('[LibraryScreen] handleAddFolder: button tapped');
     setStatus('Waiting for folder selection...');
     setError(null);
     try {
-      await pickAndSaveFolder();
-      console.log('[LibraryScreen] handlePickFolder: pickAndSaveFolder resolved, rescanning');
-      await loadSavedFolder();
+      await addFolderSource();
+      await loadLibrary();
     } catch (err) {
-      console.error('[LibraryScreen] handlePickFolder: failed', err);
+      console.error('[LibraryScreen] handleAddFolder: failed', err);
       setError(String(err));
       setStatus('Folder selection cancelled or failed.');
     }
   }
 
-  async function handleForget() {
-    await clearSavedFolder();
-    setFolderUri(null);
-    setFiles([]);
-    setStatus('Folder access forgotten.');
+  async function handleAddFiles() {
+    console.log('[LibraryScreen] handleAddFiles: button tapped');
+    setStatus('Waiting for file selection...');
+    setError(null);
+    try {
+      await addFileSources();
+      await loadLibrary();
+    } catch (err) {
+      console.error('[LibraryScreen] handleAddFiles: failed', err);
+      setError(String(err));
+      setStatus('File selection cancelled or failed.');
+    }
+  }
+
+  async function handleRemoveSource(uri: string) {
+    await removeSource(uri);
+    await loadLibrary();
   }
 
   return (
@@ -65,26 +77,42 @@ export default function LibraryScreen() {
       {error && <p className="error">{error}</p>}
 
       <div className="actions">
-        <button onClick={handlePickFolder}>
-          {folderUri ? 'Change folder' : 'Choose library folder'}
-        </button>
-        {folderUri && <button onClick={handleForget}>Forget folder</button>}
+        <button onClick={handleAddFolder}>Add folder</button>
+        <button onClick={handleAddFiles}>Add files</button>
       </div>
 
-      {folderUri && <p className="folder-uri">Folder: {folderUri}</p>}
-
-      <ul className="file-list">
-        {files.map((file) => (
-          <li key={file.uri}>
-            <span className="file-name">{file.name}</span>
-            <span className="file-path">{file.path}</span>
-          </li>
-        ))}
-      </ul>
-
-      {folderUri && files.length === 0 && (
-        <p className="empty">No .pdf or .epub files found in this folder.</p>
+      {sources.length > 0 && (
+        <section>
+          <h2>Sources</h2>
+          <ul className="source-list">
+            {sources.map(({ source, displayName }) => (
+              <li key={source.uri}>
+                <span className="source-badge">{source.type === 'folder' ? 'Folder' : 'File'}</span>
+                <span className="source-name">{displayName}</span>
+                <button className="remove-button" onClick={() => handleRemoveSource(source.uri)}>
+                  Remove
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
+
+      <section>
+        <h2>Library</h2>
+        <ul className="file-list">
+          {files.map((file) => (
+            <li key={file.uri}>
+              <span className="file-name">{file.name}</span>
+              <span className="file-path">{file.path}</span>
+            </li>
+          ))}
+        </ul>
+
+        {sources.length > 0 && files.length === 0 && (
+          <p className="empty">No .pdf or .epub files found in the added sources.</p>
+        )}
+      </section>
     </main>
   );
 }

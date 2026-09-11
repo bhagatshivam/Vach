@@ -100,6 +100,127 @@ class LibraryFolderPlugin : Plugin() {
     }
 
     @PluginMethod
+    fun pickFiles(call: PluginCall) {
+        Log.d(TAG, "pickFiles() called from JS")
+
+        // Broad type + EXTRA_MIME_TYPES isn't used here: many file managers/cloud
+        // providers don't tag .epub as application/epub+zip, so a strict MIME
+        // filter risks hiding legitimate files from the picker. Accept anything
+        // openable and filter by extension on the results instead, consistent
+        // with how folder scanning already filters (see collectLibraryFiles).
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        Log.d(TAG, "pickFiles() built intent action=${intent.action}")
+
+        try {
+            Log.d(TAG, "pickFiles() calling startActivityForResult")
+            startActivityForResult(call, intent, "handleFilesPicked")
+            Log.d(TAG, "pickFiles() startActivityForResult returned")
+        } catch (e: ActivityNotFoundException) {
+            Log.e(TAG, "pickFiles() no activity found for ACTION_OPEN_DOCUMENT", e)
+            call.reject("No app available on this device to pick files", e)
+        } catch (e: Exception) {
+            Log.e(TAG, "pickFiles() threw while launching picker", e)
+            call.reject("Failed to launch file picker: ${e.message}", e)
+        }
+    }
+
+    @ActivityCallback
+    private fun handleFilesPicked(call: PluginCall?, result: ActivityResult) {
+        Log.d(TAG, "handleFilesPicked() resultCode=${result.resultCode}")
+
+        if (call == null) {
+            Log.e(TAG, "handleFilesPicked() no saved PluginCall to resolve/reject against")
+            return
+        }
+
+        if (result.resultCode != android.app.Activity.RESULT_OK) {
+            Log.w(TAG, "handleFilesPicked() cancelled (resultCode=${result.resultCode})")
+            call.reject("File selection was cancelled")
+            return
+        }
+
+        // EXTRA_ALLOW_MULTIPLE results land in clipData when more than one file
+        // was picked, but clipData can be null even with multi-select enabled if
+        // the user picked exactly one - that single result comes back in data
+        // instead. Both paths need handling.
+        val data = result.data
+        val uris = mutableListOf<Uri>()
+        val clipData = data?.clipData
+        if (clipData != null) {
+            for (i in 0 until clipData.itemCount) {
+                clipData.getItemAt(i)?.uri?.let { uris.add(it) }
+            }
+        } else {
+            data?.data?.let { uris.add(it) }
+        }
+        Log.d(TAG, "handleFilesPicked() picked ${uris.size} uri(s)")
+
+        val accepted = mutableListOf<String>()
+        for (uri in uris) {
+            val name = DocumentFile.fromSingleUri(context, uri)?.name
+            if (name == null) {
+                Log.w(TAG, "handleFilesPicked() could not resolve name for $uri, skipping")
+                continue
+            }
+
+            val extension = name.substringAfterLast('.', "").lowercase()
+            if (extension !in SUPPORTED_EXTENSIONS) {
+                Log.d(TAG, "handleFilesPicked() skipping unsupported file: $name")
+                continue
+            }
+
+            try {
+                // Same READ-only pattern as handleFolderPicked() above, and for the
+                // same reason: PERSISTABLE is never a valid modeFlags bit here.
+                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                accepted.add(uri.toString())
+            } catch (e: Exception) {
+                Log.e(TAG, "handleFilesPicked() takePersistableUriPermission failed for $uri", e)
+            }
+        }
+        Log.d(TAG, "handleFilesPicked() accepted ${accepted.size} of ${uris.size} picked file(s)")
+
+        val ret = JSObject()
+        ret.put("uris", JSArray(accepted))
+        call.resolve(ret)
+    }
+
+    @PluginMethod
+    fun statFile(call: PluginCall) {
+        val uriString = call.getString("uri")
+        Log.d(TAG, "statFile() uri=$uriString")
+        if (uriString == null) {
+            call.reject("Missing 'uri' parameter")
+            return
+        }
+
+        val uri = Uri.parse(uriString)
+        val doc = DocumentFile.fromSingleUri(context, uri)
+        val name = doc?.name
+        if (doc == null || name == null || !doc.exists()) {
+            Log.e(TAG, "statFile() file no longer accessible: $uriString")
+            call.reject("File is no longer accessible")
+            return
+        }
+
+        val file = JSObject()
+        file.put("name", name)
+        file.put("uri", uri.toString())
+        file.put("path", name)
+        file.put("size", doc.length())
+        Log.d(TAG, "statFile() resolved name=$name size=${doc.length()}")
+
+        val ret = JSObject()
+        ret.put("file", file)
+        call.resolve(ret)
+    }
+
+    @PluginMethod
     fun hasPersistedPermission(call: PluginCall) {
         val uriString = call.getString("uri")
         Log.d(TAG, "hasPersistedPermission() uri=$uriString")
@@ -140,6 +261,7 @@ class LibraryFolderPlugin : Plugin() {
         Log.d(TAG, "scanFolder() found ${results.length()} matching file(s)")
 
         val ret = JSObject()
+        ret.put("name", root.name ?: uriString)
         ret.put("files", results)
         call.resolve(ret)
     }
