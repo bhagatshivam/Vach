@@ -37,12 +37,15 @@ export default function LibraryScreen() {
   }, [loadSavedFolder]);
 
   async function handlePickFolder() {
+    console.log('[LibraryScreen] handlePickFolder: button tapped');
     setStatus('Waiting for folder selection...');
     setError(null);
     try {
       await pickAndSaveFolder();
+      console.log('[LibraryScreen] handlePickFolder: pickAndSaveFolder resolved, rescanning');
       await loadSavedFolder();
     } catch (err) {
+      console.error('[LibraryScreen] handlePickFolder: failed', err);
       setError(String(err));
       setStatus('Folder selection cancelled or failed.');
     }
