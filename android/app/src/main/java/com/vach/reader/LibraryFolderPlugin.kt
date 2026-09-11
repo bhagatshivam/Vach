@@ -28,6 +28,12 @@ class LibraryFolderPlugin : Plugin() {
     fun pickFolder(call: PluginCall) {
         Log.d(TAG, "pickFolder() called from JS")
 
+        // FLAG_GRANT_PERSISTABLE_URI_PERMISSION belongs here, on the intent that
+        // requests the grant — it tells the system this grant may later be made
+        // permanent. It must NOT also be passed to takePersistableUriPermission()
+        // below: that call's modeFlags only ever accepts READ/WRITE (the modes to
+        // persist), never PERSISTABLE itself. The two calls read-only: request just
+        // READ, no WRITE, since this app never writes to the library folder.
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
         }
@@ -70,9 +76,16 @@ class LibraryFolderPlugin : Plugin() {
 
         Log.d(TAG, "handleFolderPicked() got uri=$uri, taking persistable permission")
         try {
+            // modeFlags here must match the modes actually granted on this uri
+            // (READ, since that's all pickFolder()'s launch intent above requested)
+            // and must never include FLAG_GRANT_PERSISTABLE_URI_PERMISSION itself -
+            // that flag has no meaning as a "mode" to persist, only as a request on
+            // the launch intent. Passing it here throws
+            // "Requested flags 0x41, but only 0x3 are allowed" - it did until this
+            // fix, always, on every device, since 0x41 is never a valid mode.
             context.contentResolver.takePersistableUriPermission(
                 uri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
             )
         } catch (e: Exception) {
             Log.e(TAG, "handleFolderPicked() takePersistableUriPermission failed", e)
