@@ -82,7 +82,7 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
 
   return (
     <div className="reader" style={{ background: themeColors.background, color: themeColors.text }}>
-      <header className="reader-header">
+      <header className="reader-header" style={{ background: themeColors.background, color: themeColors.text }}>
         <button className="icon-button" onClick={onBack}>
           Back
         </button>
@@ -187,18 +187,16 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
         </section>
       )}
 
-      <div className="reader-scroll">
-        {status && <p className="status">{status}</p>}
-        {error && <p className="error">{error}</p>}
+      {status && <p className="status">{status}</p>}
+      {error && <p className="error">{error}</p>}
 
-        {epub && (
-          <div className="reader-content" style={contentStyle}>
-            {epub.chaptersHtml.map((html, i) => (
-              <section key={i} className="chapter" dangerouslySetInnerHTML={{ __html: html }} />
-            ))}
-          </div>
-        )}
-      </div>
+      {epub && (
+        <div className="reader-content" style={contentStyle}>
+          {epub.chaptersHtml.map((html, i) => (
+            <section key={i} className="chapter" dangerouslySetInnerHTML={{ __html: html }} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

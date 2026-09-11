@@ -137,18 +137,25 @@
 
 .reader {
   min-height: 100svh;
-  display: flex;
-  flex-direction: column;
+  /* Reserves space for .reader-header, which is position: fixed and so no
+     longer occupies layout space of its own - without this, the settings
+     panel/content would render underneath it. Kept a little generous since
+     the header's rendered height isn't measured here. */
+  padding-top: 56px;
 }
 
 .reader-header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 20;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   padding: 12px 16px;
   border-bottom: 1px solid rgba(128, 128, 128, 0.25);
-  flex-shrink: 0;
 }
 
 .reader-title {
@@ -179,7 +186,6 @@
   padding: 16px;
   border-bottom: 1px solid rgba(128, 128, 128, 0.25);
   background: rgba(128, 128, 128, 0.06);
-  flex-shrink: 0;
 }
 
 .setting-row {
@@ -223,12 +229,6 @@
   align-items: center;
   gap: 4px;
   font-size: 12px;
-}
-
-.reader-scroll {
-  flex: 1;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
 }
 
 .reader-content {
