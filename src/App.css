@@ -156,6 +156,15 @@
   gap: 8px;
   padding: 12px 16px;
   border-bottom: 1px solid rgba(128, 128, 128, 0.25);
+  transition:
+    opacity 0.25s ease,
+    transform 0.25s ease;
+}
+
+.reader-header.hidden {
+  opacity: 0;
+  transform: translateY(-100%);
+  pointer-events: none;
 }
 
 .reader-title {
@@ -180,12 +189,25 @@
 }
 
 .reader-settings {
+  /* Fixed, not document flow: this is what actually fixes the settings
+     panel being unreachable once scrolled. It used to be a normal-flow
+     sibling positioned right after the header's reserved space - i.e.
+     anchored to the top of the *document*, not the *viewport*. Once
+     scrolled away from the top, tapping Aa still worked (state toggled,
+     panel really was inserted) but the panel rendered off-screen above
+     the visible area, indistinguishable from the tap doing nothing. */
+  position: fixed;
+  top: 56px;
+  left: 0;
+  right: 0;
+  z-index: 15;
+  max-height: calc(100svh - 56px);
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 12px;
   padding: 16px;
   border-bottom: 1px solid rgba(128, 128, 128, 0.25);
-  background: rgba(128, 128, 128, 0.06);
 }
 
 .setting-row {

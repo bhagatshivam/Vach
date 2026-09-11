@@ -1,8 +1,9 @@
-import { useEffect, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { readFileBase64, type LibraryFile } from '../lib/libraryFolder';
 import { parseEpub, type ParsedEpub } from '../lib/epub';
 import {
   DEFAULT_READER_SETTINGS,
+  FONT_FAMILY_OPTIONS,
   FONT_FAMILY_STACKS,
   THEME_COLORS,
   getReaderSettings,
@@ -20,6 +21,7 @@ const FONT_SIZE_MIN = 14;
 const FONT_SIZE_MAX = 28;
 const LINE_HEIGHT_MIN = 1.2;
 const LINE_HEIGHT_MAX = 2.2;
+const NAV_IDLE_MS = 3000;
 
 export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
   const [settings, setSettings] = useState<ReaderSettings>(DEFAULT_READER_SETTINGS);
@@ -27,6 +29,8 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
   const [status, setStatus] = useState('Loading...');
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [navVisible, setNavVisible] = useState(true);
+  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     getReaderSettings().then(setSettings);
@@ -61,6 +65,44 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
     };
   }, [file]);
 
+  const clearIdleTimer = useCallback(() => {
+    if (idleTimerRef.current) {
+      clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
+  }, []);
+
+  // Auto-hides the nav bar after a few seconds idle, standard reading-app
+  // behavior. Doesn't run while there's nothing to read yet (loading/error),
+  // or while the settings panel is open - hiding the controls the user is
+  // actively adjusting would be a bad experience.
+  useEffect(() => {
+    clearIdleTimer();
+    if (navVisible && epub && !showSettings) {
+      idleTimerRef.current = setTimeout(() => setNavVisible(false), NAV_IDLE_MS);
+    }
+    return clearIdleTimer;
+  }, [navVisible, showSettings, epub, clearIdleTimer]);
+
+  // Only attached to the reading content itself (see JSX below), never to the
+  // header or settings panel - those are separate, visually-stacked-on-top
+  // elements, so a tap physically on one of them never reaches this handler
+  // in the first place. A tap while the settings panel is open dismisses the
+  // panel first, matching "tap outside to dismiss"; only a subsequent tap
+  // toggles the nav bar itself.
+  function handleContentTap() {
+    if (showSettings) {
+      setShowSettings(false);
+      return;
+    }
+    setNavVisible((visible) => !visible);
+  }
+
+  function toggleSettings() {
+    setShowSettings((s) => !s);
+    setNavVisible(true);
+  }
+
   function updateSettings(patch: Partial<ReaderSettings>) {
     setSettings((prev) => {
       const next = { ...prev, ...patch };
@@ -82,33 +124,34 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
 
   return (
     <div className="reader" style={{ background: themeColors.background, color: themeColors.text }}>
-      <header className="reader-header" style={{ background: themeColors.background, color: themeColors.text }}>
+      <header
+        className={`reader-header${navVisible ? '' : ' hidden'}`}
+        style={{ background: themeColors.background, color: themeColors.text }}
+      >
         <button className="icon-button" onClick={onBack}>
           Back
         </button>
         <span className="reader-title">{epub?.title ?? file.name}</span>
-        <button className="icon-button" onClick={() => setShowSettings((s) => !s)}>
+        <button className="icon-button" onClick={toggleSettings}>
           Aa
         </button>
       </header>
 
       {showSettings && (
-        <section className="reader-settings">
+        <section className="reader-settings" style={{ background: themeColors.background, color: themeColors.text }}>
           <div className="setting-row">
             <span>Font</span>
             <div className="setting-options">
-              <button
-                className={settings.fontFamily === 'serif' ? 'active' : ''}
-                onClick={() => updateSettings({ fontFamily: 'serif' })}
-              >
-                Serif
-              </button>
-              <button
-                className={settings.fontFamily === 'sans' ? 'active' : ''}
-                onClick={() => updateSettings({ fontFamily: 'sans' })}
-              >
-                Sans
-              </button>
+              {FONT_FAMILY_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  className={settings.fontFamily === option.id ? 'active' : ''}
+                  style={{ fontFamily: option.stack }}
+                  onClick={() => updateSettings({ fontFamily: option.id })}
+                >
+                  {option.label}
+                </button>
+              ))}
             </div>
           </div>
 
@@ -191,7 +234,7 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
       {error && <p className="error">{error}</p>}
 
       {epub && (
-        <div className="reader-content" style={contentStyle}>
+        <div className="reader-content" style={contentStyle} onClick={handleContentTap}>
           {epub.chaptersHtml.map((html, i) => (
             <section key={i} className="chapter" dangerouslySetInnerHTML={{ __html: html }} />
           ))}
