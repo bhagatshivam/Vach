@@ -3,6 +3,96 @@ import DOMPurify from 'dompurify';
 
 export type ParseEvent = { type: 'title'; title: string } | { type: 'chapter'; html: string };
 
+// Generous for a real chapter (even a 10MB chapter of plain XHTML text is
+// hundreds of thousands of words) but small enough to bound the cost of a
+// pathological one - a zip bomb, or just a genuinely malformed/huge single
+// entry - to a short, contained failure (the existing per-chapter error
+// placeholder) instead of a multi-second main-thread stall.
+const MAX_CHAPTER_UNCOMPRESSED_BYTES = 10 * 1024 * 1024;
+
+// Generous for even a very high-resolution cover/illustration, for the same
+// reason. An oversized image is dropped (same as an unresolved one) rather
+// than failing the whole chapter - one bad image shouldn't take the rest of
+// the chapter's text down with it.
+const MAX_IMAGE_UNCOMPRESSED_BYTES = 20 * 1024 * 1024;
+
+// jszip's internalStream() isn't in its published TypeScript types (its own
+// type comment on the related, genuinely-private _data field even says so:
+// "If/when it is made public this should be uncommented") but it's a real,
+// non-underscore-prefixed prototype method - the same streaming primitive
+// async() itself uses internally. This is a minimal structural type for the
+// handful of methods used below.
+interface JSZipStreamHelper {
+  on(event: 'data', fn: (chunk: Uint8Array) => void): JSZipStreamHelper;
+  on(event: 'error', fn: (err: Error) => void): JSZipStreamHelper;
+  on(event: 'end', fn: () => void): JSZipStreamHelper;
+  pause(): JSZipStreamHelper;
+  resume(): JSZipStreamHelper;
+}
+
+/**
+ * Reads a zip entry's full decompressed content as bytes, aborting as soon
+ * as more than maxBytes has actually come out of the decompressor.
+ *
+ * Deliberately not a check of the zip's own declared "uncompressed size"
+ * header: that number is just a field in the zip file, written by whoever
+ * created it, and decompression doesn't stop just because the file lied
+ * about it - trusting it isn't a real cap. Counting real bytes as they're
+ * actually produced, via jszip's own internal streaming primitive, pausing
+ * and rejecting the moment the cap is crossed, bounds actual memory and CPU
+ * to roughly the cap regardless of what either a tiny on-disk size or a
+ * dishonest header claims.
+ */
+function readEntryBytesCapped(entry: JSZip.JSZipObject, maxBytes: number): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const stream = (
+      entry as unknown as { internalStream: (type: 'uint8array') => JSZipStreamHelper }
+    ).internalStream('uint8array');
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    let settled = false;
+
+    stream
+      .on('data', (chunk) => {
+        if (settled) return;
+        total += chunk.length;
+        if (total > maxBytes) {
+          settled = true;
+          stream.pause();
+          reject(new Error(`Entry "${entry.name}" exceeds the ${maxBytes}-byte decompressed-size cap`));
+          return;
+        }
+        chunks.push(chunk);
+      })
+      .on('error', (err) => {
+        if (settled) return;
+        settled = true;
+        reject(err);
+      })
+      .on('end', () => {
+        if (settled) return;
+        settled = true;
+        const result = new Uint8Array(total);
+        let offset = 0;
+        for (const chunk of chunks) {
+          result.set(chunk, offset);
+          offset += chunk.length;
+        }
+        resolve(result);
+      })
+      .resume();
+  });
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
 function localName(el: Element): string {
   return el.localName || el.tagName.split(':').pop() || el.tagName;
 }
@@ -412,10 +502,18 @@ export async function* streamEpub(base64: string, fallbackTitle: string): AsyncG
       imageCache.set(resolvedHref, null);
       return null;
     }
-    const base64Data = await entry.async('base64');
-    const dataUri = `data:${item!.mediaType};base64,${base64Data}`;
-    imageCache.set(resolvedHref, dataUri);
-    return dataUri;
+    try {
+      const bytes = await readEntryBytesCapped(entry, MAX_IMAGE_UNCOMPRESSED_BYTES);
+      const dataUri = `data:${item!.mediaType};base64,${bytesToBase64(bytes)}`;
+      imageCache.set(resolvedHref, dataUri);
+      return dataUri;
+    } catch (err) {
+      // Same treatment as an image that doesn't resolve at all - drop it,
+      // don't take the whole chapter down over one oversized/corrupt image.
+      console.error('[epub] image exceeded size cap or failed to decompress, dropping', resolvedHref, err);
+      imageCache.set(resolvedHref, null);
+      return null;
+    }
   }
 
   let emitted = 0;
@@ -425,7 +523,8 @@ export async function* streamEpub(base64: string, fallbackTitle: string): AsyncG
 
     let html: string;
     try {
-      const rawHtml = await entry.async('string');
+      const bytes = await readEntryBytesCapped(entry, MAX_CHAPTER_UNCOMPRESSED_BYTES);
+      const rawHtml = new TextDecoder().decode(bytes);
       html = await sanitizeChapterHtml(rawHtml, dirOf(href), resolveImage);
     } catch (err) {
       console.error('[epub] failed to parse chapter', href, err);

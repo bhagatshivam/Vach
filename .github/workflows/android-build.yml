@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: android-build-${{ github.ref }}
   cancel-in-progress: true
@@ -23,6 +26,15 @@ jobs:
 
       - name: Install web dependencies
         run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit -p .
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run tests
+        run: npm run test
 
       - name: Build web assets
         run: npm run build
@@ -49,6 +61,34 @@ jobs:
       - name: Build debug APK
         working-directory: android
         run: ./gradlew assembleDebug --no-daemon
+
+      # This app is offline-only by design (reads local SAF-granted files,
+      # never fetches anything) - android.permission.INTERNET was removed
+      # from AndroidManifest.xml for exactly that reason. Checking the
+      # *merged* manifest of the actual built APK, not just our own source
+      # manifest, is what makes that a real, permanent guarantee rather than
+      # "true as long as no future dependency's own manifest ever adds it
+      # back" - the Android Gradle Plugin's manifest merger combines ours
+      # with every library's, and this is the only way to see the result it
+      # actually produces.
+      - name: Verify no INTERNET permission in merged manifest
+        run: |
+          set -e
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          AAPT2=$(find "$SDK_ROOT/build-tools" -name aapt2 -type f | sort -V | tail -1)
+          if [ -z "$AAPT2" ]; then
+            echo "::error::Could not locate aapt2 under $SDK_ROOT/build-tools"
+            exit 1
+          fi
+          echo "Using aapt2: $AAPT2"
+          echo "=== Permissions in merged manifest ($APK) ==="
+          "$AAPT2" dump permissions "$APK"
+          if "$AAPT2" dump permissions "$APK" | grep -q "android.permission.INTERNET"; then
+            echo "::error::android.permission.INTERNET is present in the merged manifest - this app must stay network-incapable at the OS level"
+            exit 1
+          fi
+          echo "Confirmed: no INTERNET permission in the merged manifest"
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4

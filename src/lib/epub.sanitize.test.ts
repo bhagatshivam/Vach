@@ -54,6 +54,38 @@ async function sanitizedChapter(body: string): Promise<string> {
   return (await sanitizedChapters([body]))[0];
 }
 
+async function buildEpubBase64WithImageBytes(chapterBodies: string[], imageBytes: Uint8Array): Promise<string> {
+  const zip = new JSZip();
+  zip.file(
+    'META-INF/container.xml',
+    `<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>`,
+  );
+  zip.file('OEBPS/Images/cover.png', imageBytes);
+
+  const manifestItems = ['<item id="img0" href="Images/cover.png" media-type="image/png"/>'];
+  const spineItems: string[] = [];
+  chapterBodies.forEach((body, i) => {
+    manifestItems.push(`<item id="c${i}" href="Text/c${i}.xhtml" media-type="application/xhtml+xml"/>`);
+    spineItems.push(`<itemref idref="c${i}"/>`);
+    zip.file(`OEBPS/Text/c${i}.xhtml`, `<html xmlns="http://www.w3.org/1999/xhtml"><body>${body}</body></html>`);
+  });
+
+  zip.file(
+    'OEBPS/content.opf',
+    `<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="BookId">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Test Book</dc:title></metadata>
+  <manifest>${manifestItems.join('\n')}</manifest>
+  <spine>${spineItems.join('\n')}</spine>
+</package>`,
+  );
+
+  return zip.generateAsync({ type: 'base64' });
+}
+
 // NOTE on jsdom vs. Chromium: these tests run under jsdom (via vitest's
 // jsdom environment), which gives a real DOMParser/document but does NOT
 // fire img onerror/onload events, does NOT make network requests, and does
@@ -263,5 +295,43 @@ describe('sanitizeChapterHtml - legitimate content survives (feature matrix)', (
     expect(chapters[0]).toContain('CHAPTER_ONE');
     expect(chapters[1]).toContain('CHAPTER_TWO');
     expect(chapters[1].toLowerCase()).not.toContain('<script');
+  });
+});
+
+describe('per-entry decompressed-size cap (pathological chapters/images)', () => {
+  it(
+    'shows the per-chapter error placeholder for a chapter whose decompressed size exceeds the cap, without affecting its neighbors',
+    async () => {
+      const hugeBody = `<p>${'A'.repeat(11 * 1024 * 1024)}</p>`; // over the 10MB chapter cap
+      const chapters = await sanitizedChapters(['<p>BEFORE_MARKER</p>', hugeBody, '<p>AFTER_MARKER</p>']);
+      expect(chapters).toHaveLength(3);
+      expect(chapters[0]).toContain('BEFORE_MARKER');
+      expect(chapters[1]).toContain('This chapter could not be loaded');
+      expect(chapters[2]).toContain('AFTER_MARKER');
+    },
+    20000,
+  );
+
+  it(
+    'drops an image whose decompressed size exceeds the cap, same as an image that never resolves - it does not fail the chapter',
+    async () => {
+      const hugeImage = new Uint8Array(21 * 1024 * 1024).fill(65); // over the 20MB image cap
+      const base64 = await buildEpubBase64WithImageBytes(['<p>TEXT_MARKER</p><img src="../Images/cover.png" alt="x">'], hugeImage);
+      const chapters: string[] = [];
+      for await (const event of streamEpub(base64, 'test.epub')) {
+        if (event.type === 'chapter') chapters.push(event.html);
+      }
+      expect(chapters).toHaveLength(1);
+      expect(chapters[0]).toContain('TEXT_MARKER');
+      expect(chapters[0]).not.toContain('data:image');
+      expect(chapters[0].toLowerCase()).not.toContain('could not be loaded');
+    },
+    20000,
+  );
+
+  it('still loads a normal-sized chapter and image well within the caps', async () => {
+    const html = await sanitizedChapter('<p>NORMAL_MARKER</p><img src="../Images/cover.png" alt="x">');
+    expect(html).toContain('NORMAL_MARKER');
+    expect(html).toMatch(/<img[^>]*src="data:image\/png;base64,/);
   });
 });

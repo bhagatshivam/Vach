@@ -130,7 +130,22 @@ function base64ToBytes(base64: string): Uint8Array {
  * the moment it's ready rather than collecting all of them first.
  */
 export async function* streamPdf(base64: string, fallbackTitle: string): AsyncGenerator<ParseEvent> {
-  const doc = await pdfjsLib.getDocument({ data: base64ToBytes(base64) }).promise;
+  let doc;
+  try {
+    doc = await pdfjsLib.getDocument({ data: base64ToBytes(base64) }).promise;
+  } catch (err) {
+    // No onPassword callback is passed above - there's no password-entry UI
+    // yet - so pdf.js rejects immediately for any encrypted PDF with a
+    // PasswordException (identified by .name, since importing the class
+    // itself just to instanceof-check it isn't worth the extra coupling).
+    // Without this, the raw rejection (whatever pdf.js's own message
+    // happens to be for this pdf.js/engine combination) would reach the
+    // user verbatim via ReaderScreen's generic catch-all.
+    if (err instanceof Error && err.name === 'PasswordException') {
+      throw new Error("This PDF is password-protected and can't be opened");
+    }
+    throw err;
+  }
 
   let title = fallbackTitle;
   try {
