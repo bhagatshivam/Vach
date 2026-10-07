@@ -4,6 +4,10 @@ import {
   DEFAULT_READER_SETTINGS,
   FONT_FAMILY_OPTIONS,
   FONT_FAMILY_STACKS,
+  FONT_SIZE_MAX,
+  FONT_SIZE_MIN,
+  LINE_HEIGHT_MAX,
+  LINE_HEIGHT_MIN,
   THEME_COLORS,
   getReaderSettings,
   saveReaderSettings,
@@ -48,10 +52,6 @@ async function* streamBook(base64: string, fileName: string) {
   yield* streamEpub(base64, fileName);
 }
 
-const FONT_SIZE_MIN = 14;
-const FONT_SIZE_MAX = 28;
-const LINE_HEIGHT_MIN = 1.2;
-const LINE_HEIGHT_MAX = 2.2;
 const NAV_IDLE_MS = 3000;
 
 export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {

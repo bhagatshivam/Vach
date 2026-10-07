@@ -2,6 +2,27 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!--
+      Offline-only app: everything this page loads is same-origin (bundled
+      fonts, data: URIs for images, a same-origin pdf.js worker). No remote
+      origin is ever legitimate here, so connect-src/img-src/font-src/etc.
+      are all scoped to 'self' with no exceptions carved out for a CDN.
+      style-src needs 'unsafe-inline' because both React's own dynamic
+      inline styles (font/size/theme controls) and sanitized chapter content
+      use real style="" attributes, not stylesheets - CSS alone can't
+      execute script, and the sanitizer independently restricts which
+      properties/values survive in chapter content anyway (see epub.ts).
+      Verified empirically (real Chromium, production bundle, an EPUB with
+      both a plain <img> and an SVG-wrapped cover, and a real PDF) with zero
+      securitypolicyviolation events: worker-src 'self' alone is enough for
+      pdf.js's worker - no blob: needed, since the worker is instantiated
+      from the same-origin static URL Vite's ?url import produces, not a
+      Blob. No other directive needed loosening either.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; worker-src 'self'; connect-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';"
+    />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Vach</title>

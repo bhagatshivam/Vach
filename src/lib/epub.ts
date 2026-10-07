@@ -1,15 +1,7 @@
 import JSZip from 'jszip';
+import DOMPurify from 'dompurify';
 
 export type ParseEvent = { type: 'title'; title: string } | { type: 'chapter'; html: string };
-
-const STRIPPED_INLINE_STYLE_PROPS = new Set([
-  'font-family',
-  'font-size',
-  'line-height',
-  'color',
-  'background',
-  'background-color',
-]);
 
 function localName(el: Element): string {
   return el.localName || el.tagName.split(':').pop() || el.tagName;
@@ -109,34 +101,259 @@ function extractTitle(opfXml: string): string | null {
   return text || null;
 }
 
+// ---------------------------------------------------------------------------
+// Sanitization: default-deny allowlist (DOMPurify), not a blocklist.
+//
+// A hand-rolled walker (the previous approach) only ever stops the specific
+// attack it was written against - a security audit of that approach kept
+// finding one more unstripped tag (iframe, object, embed, base, meta, link,
+// style, form, SVG's own xlink:href on <a>) because every one of those had
+// to be individually remembered and blocked. DOMPurify inverts that: nothing
+// survives unless it's explicitly allowed below, so a tag/attribute this
+// list doesn't know about is already gone, not a future finding.
+//
+// Keep this list deliberately short. Adding to it is a deliberate, reviewed
+// decision - not a place to paper over a rendering complaint by widening the
+// allowlist first and asking questions later.
+// ---------------------------------------------------------------------------
+
+// Structural and text-formatting tags a light novel's chapter markup
+// realistically uses, plus <img> (tightly constrained below - see
+// ALLOWED_URI_REGEXP and the uponSanitizeAttribute hook). Deliberately
+// excludes <a>: a stripped/neutralized link and no link at all read
+// identically once rendered (neither is clickable), and DOMPurify's default
+// behavior for a disallowed tag is to drop the tag but keep its text content,
+// so footnote/cross-reference text still survives, just as inert text
+// instead of an href-less anchor.
+const ALLOWED_TAGS = [
+  'p',
+  'div',
+  'span',
+  'section',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'br',
+  'hr',
+  'em',
+  'strong',
+  'i',
+  'b',
+  'u',
+  's',
+  'del',
+  'ins',
+  'sub',
+  'sup',
+  'small',
+  'blockquote',
+  'ul',
+  'ol',
+  'li',
+  'table',
+  'thead',
+  'tbody',
+  'tfoot',
+  'tr',
+  'td',
+  'th',
+  'caption',
+  'colgroup',
+  'col',
+  'figure',
+  'figcaption',
+  'pre',
+  'code',
+  'ruby',
+  'rt',
+  'rp',
+  'img',
+];
+
+// No class/id: nothing in this app's own CSS targets chapter-content
+// classes, so there's no legitimate use for them, and they're a classic
+// vector for CSS-based tricks if that ever changes. style is kept but its
+// *value* is independently re-validated below - this list only controls
+// which attribute names can exist at all.
+const ALLOWED_ATTR = ['alt', 'src', 'width', 'height', 'colspan', 'rowspan', 'lang', 'dir', 'style'];
+
+// Inline style: a short allowlist of structural properties only - nothing
+// that can paint, fetch, or navigate. Each property additionally has its
+// *value* validated (see isSafeStyleValue) rather than merely being present,
+// which is what actually closes the background-image network-leak finding:
+// the property name is allowed in neither list, but even an allowed
+// property's value is rejected outright if it contains parentheses at all,
+// so a disguised url()/expression()/var()/calc() can't sneak in under a
+// property name that looks safe.
+const ALLOWED_STYLE_PROPS = new Set([
+  'text-align',
+  'text-indent',
+  'font-style',
+  'font-weight',
+  'text-decoration',
+  'margin',
+  'margin-top',
+  'margin-bottom',
+  'margin-left',
+  'margin-right',
+]);
+
+const LENGTH_OR_AUTO = /^(-?\d+(\.\d+)?(px|em|rem|%)?|auto)$/;
+
+function isSafeStyleValue(prop: string, value: string): boolean {
+  const v = value.trim();
+  if (!v || /[(){}]/.test(v)) return false;
+  switch (prop) {
+    case 'text-align':
+      return /^(left|right|center|justify)$/i.test(v);
+    case 'text-indent':
+      return /^-?\d+(\.\d+)?(px|em|rem|%)?$/.test(v);
+    case 'font-style':
+      return /^(normal|italic|oblique)$/i.test(v);
+    case 'font-weight':
+      return /^(normal|bold|bolder|lighter|[1-9]00)$/i.test(v);
+    case 'text-decoration':
+      return /^(none|underline|overline|line-through)(\s+(underline|overline|line-through))*$/i.test(v);
+    case 'margin':
+    case 'margin-top':
+    case 'margin-bottom':
+    case 'margin-left':
+    case 'margin-right': {
+      const tokens = v.split(/\s+/);
+      return tokens.length >= 1 && tokens.length <= 4 && tokens.every((t) => LENGTH_OR_AUTO.test(t));
+    }
+    default:
+      return false;
+  }
+}
+
+function sanitizeStyleAttr(style: string): string {
+  return style
+    .split(';')
+    .map((decl) => decl.trim())
+    .filter(Boolean)
+    .map((decl) => {
+      const idx = decl.indexOf(':');
+      if (idx === -1) return null;
+      const prop = decl.slice(0, idx).trim().toLowerCase();
+      const value = decl.slice(idx + 1).trim();
+      if (!ALLOWED_STYLE_PROPS.has(prop) || !isSafeStyleValue(prop, value)) return null;
+      return `${prop}: ${value}`;
+    })
+    .filter((d): d is string => d !== null)
+    .join('; ');
+}
+
+// Registered once at module load, not per-chapter - DOMPurify hooks are
+// global to the module's DOMPurify instance, so adding one inside
+// sanitizeChapterHtml would stack a duplicate on every call.
+//
+// img src is the only URI-bearing attribute this app allows at all, and it
+// must only ever be a data: URI for an image - resolveImage() (below) is the
+// only thing that ever produces one, from bytes this app itself decompressed
+// out of the EPUB's own manifest. Anything else (a relative path that
+// survived unresolved, http(s):, javascript:, data:text/html) is dropped.
+// ALLOWED_URI_REGEXP enforces the same rule at the DOMPurify-config level as
+// a second, independent check.
+DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
+  if (data.attrName === 'style') {
+    data.attrValue = sanitizeStyleAttr(data.attrValue);
+    if (!data.attrValue) data.keepAttr = false;
+    return;
+  }
+  if (data.attrName === 'src' && node.nodeName === 'IMG' && !/^data:image\//i.test(data.attrValue)) {
+    data.keepAttr = false;
+  }
+});
+
+const DOMPURIFY_CONFIG = {
+  ALLOWED_TAGS,
+  ALLOWED_ATTR,
+  ALLOWED_URI_REGEXP: /^data:image\//i,
+  ALLOW_DATA_ATTR: false,
+  // Explicit on top of the allowlist default-deny, so the intent reads
+  // clearly even though these are already absent from ALLOWED_TAGS: no
+  // script/active content, no additional stylesheets or navigation, no SVG
+  // or MathML (and nothing from either namespace sneaks in disguised as
+  // HTML; foreign content gets the same tag/attribute checks regardless of
+  // namespace).
+  FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'meta', 'link', 'base', 'style', 'svg'],
+};
+
 /**
- * Strips everything from a chapter's markup that could fight our own
- * font/size/line-height/theme controls or break out of the app, while
- * preserving real structure (paragraphs, headings, emphasis, images):
- * - <script> removed outright.
- * - <a href> neutralized - footnote/cross-chapter links are meaningless
- *   once chapters are concatenated into one document, and left alone they
- *   could navigate the WebView somewhere broken.
- * - on* event handler attributes removed.
- * - <img src> rewritten to the pre-extracted data: URI for that image.
- * - SVG-wrapped images (<svg><image xlink:href="..."/></svg>, the
- *   standard cover-page/full-bleed-illustration pattern from Calibre,
- *   Sigil, and most other EPUB tools) get the same src-rewriting
- *   treatment via whichever of xlink:href/href they carry - <img> alone
- *   missed this entirely, leaving covers built this way blank.
- * - inline style attributes kept, but with font/color/background
- *   properties stripped out (those are exactly the properties our own
- *   theme/font controls need to own).
- * The chapter's own <head> (its <link rel="stylesheet"> and <style>
- * tags) is discarded entirely by only reading .body - this is what stops
- * the EPUB's own CSS from ever being loaded in the first place.
- *
- * Images are resolved lazily via resolveImage rather than from a
- * pre-built map: decompressing every image in the book up front (the
- * original approach) was a real cost proportional to total images in the
- * book, paid entirely before the first chapter could render. Resolving
- * on demand, one chapter's worth of images at a time, is what lets the
- * first chapter show up quickly for image-heavy books.
+ * SVG-wrapped images (<svg><image xlink:href="..."/></svg>, the standard
+ * cover-page/full-bleed-illustration pattern from Calibre, Sigil, and most
+ * other EPUB tools) are pre-converted to plain <img> elements - reusing the
+ * same resolveImage() lookup <img src> itself uses - before DOMPurify ever
+ * runs, because SVG is forbidden outright afterward (SVG script/foreignObject/
+ * CSS are exactly the kind of namespace-confusion surface a hand-rolled
+ * walker gets wrong, and this app has no legitimate use for inline SVG).
+ * DOMPurify's default behavior for a forbidden tag - remove the tag, keep
+ * its children - unwraps the now-empty <svg>/<g> wrapper around the
+ * replacement <img> for free.
+ */
+async function convertSvgImagesToImg(
+  doc: Document,
+  chapterDir: string,
+  resolveImage: (resolvedHref: string) => Promise<string | null>,
+): Promise<void> {
+  for (const image of Array.from(doc.querySelectorAll('image'))) {
+    const attrName = image.hasAttribute('xlink:href') ? 'xlink:href' : image.hasAttribute('href') ? 'href' : null;
+    const href = attrName ? image.getAttribute(attrName) : null;
+    const dataUri = href ? await resolveImage(resolveRelativePath(chapterDir, href)) : null;
+
+    if (dataUri) {
+      const img = doc.createElement('img');
+      img.setAttribute('src', dataUri);
+      const width = image.getAttribute('width');
+      const height = image.getAttribute('height');
+      if (width) img.setAttribute('width', width);
+      if (height) img.setAttribute('height', height);
+      image.replaceWith(img);
+    } else {
+      image.remove();
+    }
+  }
+}
+
+/**
+ * Resolves <img src> to the pre-extracted data: URI for that image (or
+ * drops the attribute if it doesn't resolve to a real manifest image) -
+ * this is the one and only place a real data:image/* URI is ever produced,
+ * which is what the DOMPurify hook above is trusting when it lets an <img
+ * src> through.
+ */
+async function resolveImgSrcs(
+  doc: Document,
+  chapterDir: string,
+  resolveImage: (resolvedHref: string) => Promise<string | null>,
+): Promise<void> {
+  for (const img of Array.from(doc.querySelectorAll('img'))) {
+    const src = img.getAttribute('src');
+    // Already a resolved data: URI - either convertSvgImagesToImg produced
+    // this <img> itself, or (defensively) some other earlier step did.
+    // Re-running it through resolveRelativePath would treat the URI's own
+    // text as a zip-relative path and mangle it into a lookup miss.
+    if (!src || src.startsWith('data:')) continue;
+    const dataUri = await resolveImage(resolveRelativePath(chapterDir, src));
+    if (dataUri) {
+      img.setAttribute('src', dataUri);
+    } else {
+      img.removeAttribute('src');
+    }
+  }
+}
+
+/**
+ * Parses a chapter's raw markup, resolves its images to data: URIs, and
+ * runs the result through DOMPurify's default-deny allowlist (see
+ * DOMPURIFY_CONFIG above) rather than trying to enumerate everything
+ * dangerous. The chapter's own <head> (its <link rel="stylesheet"> and
+ * <style> tags) is discarded entirely by only reading .body - and <style>/
+ * <link> are forbidden outright by DOMPurify too, as defense in depth.
  */
 async function sanitizeChapterHtml(
   rawHtml: string,
@@ -145,58 +362,10 @@ async function sanitizeChapterHtml(
 ): Promise<string> {
   const doc = new DOMParser().parseFromString(rawHtml, 'text/html');
 
-  doc.querySelectorAll('script').forEach((el) => el.remove());
-  doc.querySelectorAll('a[href]').forEach((a) => a.removeAttribute('href'));
+  await convertSvgImagesToImg(doc, chapterDir, resolveImage);
+  await resolveImgSrcs(doc, chapterDir, resolveImage);
 
-  for (const img of Array.from(doc.querySelectorAll('img'))) {
-    const src = img.getAttribute('src');
-    if (!src) continue;
-    const dataUri = await resolveImage(resolveRelativePath(chapterDir, src));
-    if (dataUri) {
-      img.setAttribute('src', dataUri);
-    } else {
-      img.removeAttribute('src');
-    }
-  }
-
-  // querySelectorAll('image') only ever matches SVG <image> elements -
-  // "image" isn't a valid HTML tag name, so there's no risk of matching
-  // something else. SVG <image> can carry either the legacy xlink:href or
-  // the SVG2 plain href; whichever is present gets rewritten the same way.
-  for (const image of Array.from(doc.querySelectorAll('image'))) {
-    const attrName = image.hasAttribute('xlink:href') ? 'xlink:href' : image.hasAttribute('href') ? 'href' : null;
-    if (!attrName) continue;
-    const href = image.getAttribute(attrName);
-    if (!href) continue;
-    const dataUri = await resolveImage(resolveRelativePath(chapterDir, href));
-    if (dataUri) {
-      image.setAttribute(attrName, dataUri);
-    } else {
-      image.removeAttribute(attrName);
-    }
-  }
-
-  doc.querySelectorAll('*').forEach((el) => {
-    for (const attr of Array.from(el.attributes)) {
-      if (attr.name.toLowerCase().startsWith('on')) {
-        el.removeAttribute(attr.name);
-      }
-    }
-
-    const style = el.getAttribute('style');
-    if (!style) return;
-    const kept = style
-      .split(';')
-      .map((decl) => decl.trim())
-      .filter(Boolean)
-      .filter((decl) => !STRIPPED_INLINE_STYLE_PROPS.has(decl.split(':')[0]?.trim().toLowerCase() ?? ''))
-      .join('; ');
-
-    if (kept) el.setAttribute('style', kept);
-    else el.removeAttribute('style');
-  });
-
-  return doc.body?.innerHTML ?? '';
+  return DOMPurify.sanitize(doc.body?.innerHTML ?? '', DOMPURIFY_CONFIG);
 }
 
 /**

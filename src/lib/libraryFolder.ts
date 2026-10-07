@@ -55,12 +55,30 @@ async function migrateLegacyFolder(): Promise<void> {
   await Preferences.remove({ key: LEGACY_FOLDER_URI_KEY });
 }
 
+function isValidSource(value: unknown): value is LibrarySource {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as { type?: unknown; uri?: unknown };
+  return (v.type === 'folder' || v.type === 'file') && typeof v.uri === 'string' && v.uri.length > 0;
+}
+
 async function getSources(): Promise<LibrarySource[]> {
   await migrateLegacyFolder();
   const { value } = await Preferences.get({ key: SOURCES_KEY });
   if (!value) return [];
   try {
-    return JSON.parse(value) as LibrarySource[];
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) {
+      console.warn(LOG_TAG, 'getSources: stored sources is not an array, resetting');
+      return [];
+    }
+    // Drop individually malformed entries rather than discarding the whole
+    // list - a single bad entry (wrong shape, missing uri, a stray null)
+    // shouldn't wipe out every other legitimately-saved source.
+    const valid = parsed.filter(isValidSource);
+    if (valid.length !== parsed.length) {
+      console.warn(LOG_TAG, 'getSources: dropped', parsed.length - valid.length, 'malformed source entry/entries');
+    }
+    return valid;
   } catch (err) {
     console.warn(LOG_TAG, 'getSources: failed to parse stored sources, resetting', err);
     return [];

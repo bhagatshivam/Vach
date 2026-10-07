@@ -3,6 +3,7 @@ import { App as CapacitorApp } from '@capacitor/app';
 import './App.css';
 import LibraryScreen from './screens/LibraryScreen';
 import ReaderScreen from './screens/ReaderScreen';
+import ReaderErrorBoundary from './ReaderErrorBoundary';
 import type { LibraryFile } from './lib/libraryFolder';
 
 type Screen = { name: 'library' } | { name: 'reader'; file: LibraryFile };
@@ -32,7 +33,12 @@ function App() {
   }, []);
 
   if (screen.name === 'reader') {
-    return <ReaderScreen file={screen.file} onBack={() => setScreen({ name: 'library' })} />;
+    const backToLibrary = () => setScreen({ name: 'library' });
+    return (
+      <ReaderErrorBoundary onBack={backToLibrary}>
+        <ReaderScreen file={screen.file} onBack={backToLibrary} />
+      </ReaderErrorBoundary>
+    );
   }
 
   return <LibraryScreen onOpenBook={(file) => setScreen({ name: 'reader', file })} />;

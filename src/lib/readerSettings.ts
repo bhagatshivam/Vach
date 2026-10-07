@@ -21,13 +21,60 @@ export const DEFAULT_READER_SETTINGS: ReaderSettings = {
   customText: '#f3f4f6',
 };
 
+export const FONT_SIZE_MIN = 14;
+export const FONT_SIZE_MAX = 28;
+export const LINE_HEIGHT_MIN = 1.2;
+export const LINE_HEIGHT_MAX = 2.2;
+
 const SETTINGS_KEY = 'reader_settings';
+
+const KNOWN_THEMES: readonly ThemeName[] = ['sepia', 'night', 'beige', 'custom'];
+const KNOWN_FONT_FAMILIES: readonly FontFamily[] = ['serif', 'sans', 'literata', 'merriweather', 'atkinson'];
+const HEX_COLOR = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i;
+
+function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * Validates a settings object loaded from storage, field by field, falling
+ * back to the matching DEFAULT_READER_SETTINGS field for anything that
+ * isn't one of the known-good values - rather than trusting the stored
+ * JSON's shape. A corrupted/hand-edited Preferences value (or, on a device
+ * where something else can reach window.Capacitor.Plugins.Preferences,
+ * anything that writes one) used to crash the whole reader screen to a
+ * blank page: an invalid `theme` isn't a key in THEME_COLORS, and
+ * ReaderScreen read that object unconditionally. Every field here now has
+ * a defined, safe fallback instead of ever reaching that unconditional
+ * lookup with an unvalidated value.
+ */
+function validateReaderSettings(raw: Partial<ReaderSettings>): ReaderSettings {
+  return {
+    theme: KNOWN_THEMES.includes(raw.theme as ThemeName) ? (raw.theme as ThemeName) : DEFAULT_READER_SETTINGS.theme,
+    fontFamily: KNOWN_FONT_FAMILIES.includes(raw.fontFamily as FontFamily)
+      ? (raw.fontFamily as FontFamily)
+      : DEFAULT_READER_SETTINGS.fontFamily,
+    fontSize: clampNumber(raw.fontSize, FONT_SIZE_MIN, FONT_SIZE_MAX, DEFAULT_READER_SETTINGS.fontSize),
+    lineHeight: clampNumber(raw.lineHeight, LINE_HEIGHT_MIN, LINE_HEIGHT_MAX, DEFAULT_READER_SETTINGS.lineHeight),
+    customBackground:
+      typeof raw.customBackground === 'string' && HEX_COLOR.test(raw.customBackground)
+        ? raw.customBackground
+        : DEFAULT_READER_SETTINGS.customBackground,
+    customText:
+      typeof raw.customText === 'string' && HEX_COLOR.test(raw.customText)
+        ? raw.customText
+        : DEFAULT_READER_SETTINGS.customText,
+  };
+}
 
 export async function getReaderSettings(): Promise<ReaderSettings> {
   const { value } = await Preferences.get({ key: SETTINGS_KEY });
   if (!value) return DEFAULT_READER_SETTINGS;
   try {
-    return { ...DEFAULT_READER_SETTINGS, ...(JSON.parse(value) as Partial<ReaderSettings>) };
+    const parsed = JSON.parse(value) as Partial<ReaderSettings>;
+    if (parsed === null || typeof parsed !== 'object') return DEFAULT_READER_SETTINGS;
+    return validateReaderSettings(parsed);
   } catch {
     return DEFAULT_READER_SETTINGS;
   }
