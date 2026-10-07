@@ -262,6 +262,12 @@
   max-width: 640px;
   margin: 0 auto;
   padding: 24px 20px 64px;
+  /* Backstop: if a wide element ever isn't caught by .scroll-x below, this
+     stops it at the chapter boundary instead of widening the whole page.
+     min-width: 0 isn't load-bearing today (.reader-content isn't a flex/grid
+     child), but costs nothing and keeps this safe if that ever changes. */
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 .reader-content .chapter {
@@ -275,11 +281,53 @@
 
 .reader-content p {
   margin: 0 0 1em;
+  /* Long unbroken runs (a URL, a run-on string with no spaces) break instead
+     of pushing the chapter wider than the viewport. */
+  overflow-wrap: anywhere;
 }
 
 .reader-content h2 {
   margin: 0 0 0.75em;
   font-size: 1.3em;
+}
+
+/* Added around every sanitized <table>/<pre> (see wrapWideElements in
+   epub.ts) so a wide one - a many-column table, an ASCII-art status block -
+   scrolls inside its own box instead of forcing the whole chapter sideways. */
+.reader-content .scroll-x {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+/* The sanitizer strips class/style/border attributes from table markup (by
+   design - see DOMPURIFY_CONFIG in epub.ts), so a table arrives with no
+   visual structure of its own. This is the reader's own default look,
+   matching the neutral border convention already used elsewhere in the
+   reader UI (.icon-button, .reader-header) so it reads consistently across
+   every theme without needing theme-specific colors. */
+.reader-content table {
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+
+.reader-content th,
+.reader-content td {
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.reader-content th {
+  background: rgba(128, 128, 128, 0.12);
+  font-weight: 700;
+}
+
+.reader-content pre {
+  margin: 0 0 1em;
+  font-size: 0.85em;
+  line-height: 1.4;
 }
 
 /* PDF milestone: a page with no extractable text (image-only - covers,

@@ -283,6 +283,31 @@ describe('sanitizeChapterHtml - legitimate content survives (feature matrix)', (
     expect(html).toContain('alt="cover"');
   });
 
+  // Regression test: DOMPurify checks every allowed attribute's *value*
+  // against ALLOWED_URI_REGEXP unless the attribute name is in its own
+  // uri-safe exemption list - our narrow "data:image/..." regexp (correct
+  // for src) was silently dropping width/height/colspan/rowspan/lang/dir
+  // whenever their value didn't look like a data:image URI, i.e. always.
+  // This caught that before it ever reached a real table/image.
+  it('keeps width/height/colspan/rowspan/lang/dir with real values (not silently stripped by the img-src URI check)', async () => {
+    const html = await sanitizedChapter(
+      '<img src="../Images/cover.png" width="100" height="50">' +
+        '<table><tbody><tr><td colspan="2" rowspan="3" lang="en" dir="ltr">cell</td></tr></tbody></table>',
+    );
+    expect(html).toContain('width="100"');
+    expect(html).toContain('height="50"');
+    expect(html).toContain('colspan="2"');
+    expect(html).toContain('rowspan="3"');
+    expect(html).toContain('lang="en"');
+    expect(html).toContain('dir="ltr"');
+  });
+
+  it('still strips a non-data: <img src> (http(s)) even with ADD_URI_SAFE_ATTR covering other attributes', async () => {
+    const html = await sanitizedChapter('<img src="http://evil.example/leak.png" width="100" alt="x">');
+    expect(html).not.toContain('http://evil.example');
+    expect(html).toContain('width="100"');
+  });
+
   it('converts an SVG-wrapped cover image (<svg><image xlink:href>) into a plain <img data:...>, unwrapping the <svg>', async () => {
     const html = await sanitizedChapter('<svg width="10" height="10"><image xlink:href="../Images/cover.png" width="10" height="10"/></svg>');
     expect(html).not.toContain('<svg');
@@ -295,6 +320,53 @@ describe('sanitizeChapterHtml - legitimate content survives (feature matrix)', (
     expect(chapters[0]).toContain('CHAPTER_ONE');
     expect(chapters[1]).toContain('CHAPTER_TWO');
     expect(chapters[1].toLowerCase()).not.toContain('<script');
+  });
+});
+
+describe('sanitizeChapterHtml - wraps <table>/<pre> in .scroll-x (wide-content containment)', () => {
+  it('wraps a <table> in <div class="scroll-x">', async () => {
+    const html = await sanitizedChapter('<table><tbody><tr><td>cell</td></tr></tbody></table>');
+    expect(html).toMatch(/<div class="scroll-x"><table>/);
+  });
+
+  it('wraps a <pre> in <div class="scroll-x">', async () => {
+    const html = await sanitizedChapter('<pre>some text</pre>');
+    expect(html).toMatch(/<div class="scroll-x"><pre>/);
+  });
+
+  it('wraps each top-level <table>/<pre> independently when several appear in one chapter', async () => {
+    const html = await sanitizedChapter(
+      '<table><tbody><tr><td>one</td></tr></tbody></table><p>between</p><pre>two</pre>',
+    );
+    expect(html.match(/<div class="scroll-x">/g)).toHaveLength(2);
+  });
+
+  it('wraps a nested table at both levels (outer and inner each get their own box)', async () => {
+    const html = await sanitizedChapter(
+      '<table><tbody><tr><td>outer<table><tbody><tr><td>inner</td></tr></tbody></table></td></tr></tbody></table>',
+    );
+    expect(html.match(/<div class="scroll-x">/g)).toHaveLength(2);
+    expect(html).toMatch(/<div class="scroll-x"><table>.*<div class="scroll-x"><table>/s);
+  });
+
+  it('does not wrap ordinary elements (p, h2, ul) - only table/pre get a scroll-x box', async () => {
+    const html = await sanitizedChapter('<h2>Title</h2><p>text</p><ul><li>item</li></ul>');
+    expect(html).not.toContain('scroll-x');
+  });
+
+  it('preserves table content and attributes exactly when wrapping', async () => {
+    const html = await sanitizedChapter(
+      '<table><thead><tr><th>Name</th></tr></thead><tbody><tr><td colspan="2">Kaito</td></tr></tbody></table>',
+    );
+    expect(html).toContain('<th>Name</th>');
+    expect(html).toContain('colspan="2"');
+    expect(html).toContain('Kaito');
+  });
+
+  it('the scroll-x wrapper introduces no attribute beyond class (no id/style/data-* added)', async () => {
+    const html = await sanitizedChapter('<pre>x</pre>');
+    const wrapperTag = html.match(/<div[^>]*>/)?.[0] ?? '';
+    expect(wrapperTag).toBe('<div class="scroll-x">');
   });
 });
 

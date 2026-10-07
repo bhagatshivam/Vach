@@ -363,6 +363,17 @@ const DOMPURIFY_CONFIG = {
   ALLOWED_TAGS,
   ALLOWED_ATTR,
   ALLOWED_URI_REGEXP: /^data:image\//i,
+  // DOMPurify checks every allowed attribute's *value* against
+  // ALLOWED_URI_REGEXP, not just URI-bearing ones - any attribute whose name
+  // isn't in its own small built-in uri-safe list (alt, style, a few others)
+  // falls through to that check too, and our regexp is deliberately narrow
+  // (only "data:image/..." - fine for src, nonsensical for a number or a
+  // language code). Without this, width/height/colspan/rowspan/lang/dir were
+  // silently dropped whenever their value didn't start with "data:image/" -
+  // found via a regression test that actually asserted colspan survived a
+  // real sanitize() round trip. src is deliberately not in this list: it's
+  // the one attribute that must keep going through the regexp check.
+  ADD_URI_SAFE_ATTR: ['width', 'height', 'colspan', 'rowspan', 'lang', 'dir'],
   ALLOW_DATA_ATTR: false,
   // Explicit on top of the allowlist default-deny, so the intent reads
   // clearly even though these are already absent from ALLOWED_TAGS: no
@@ -438,6 +449,31 @@ async function resolveImgSrcs(
 }
 
 /**
+ * Wraps every <table> and <pre> in DOMPurify's own sanitized output in a
+ * <div class="scroll-x"> of our own creation, so a wide one (a many-column
+ * table, a long unbreakable table cell, an ASCII-art status block) scrolls
+ * inside its own bounded box instead of forcing the whole chapter - and with
+ * it, the whole page - to scroll sideways (see .scroll-x in App.css).
+ *
+ * This runs on DOMPurify's already-sanitized fragment, using only elements
+ * this function creates itself, so it can't reintroduce anything the
+ * allowlist above was designed to keep out - no new tag or attribute is
+ * added to ALLOWED_TAGS/ALLOWED_ATTR for this.
+ */
+function wrapWideElements(fragment: DocumentFragment): string {
+  for (const el of Array.from(fragment.querySelectorAll('table, pre'))) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'scroll-x';
+    el.replaceWith(wrapper);
+    wrapper.appendChild(el);
+  }
+
+  const container = document.createElement('div');
+  container.appendChild(fragment);
+  return container.innerHTML;
+}
+
+/**
  * Parses a chapter's raw markup, resolves its images to data: URIs, and
  * runs the result through DOMPurify's default-deny allowlist (see
  * DOMPURIFY_CONFIG above) rather than trying to enumerate everything
@@ -455,7 +491,12 @@ async function sanitizeChapterHtml(
   await convertSvgImagesToImg(doc, chapterDir, resolveImage);
   await resolveImgSrcs(doc, chapterDir, resolveImage);
 
-  return DOMPurify.sanitize(doc.body?.innerHTML ?? '', DOMPURIFY_CONFIG);
+  const fragment = DOMPurify.sanitize(doc.body?.innerHTML ?? '', {
+    ...DOMPURIFY_CONFIG,
+    RETURN_DOM_FRAGMENT: true,
+  });
+
+  return wrapWideElements(fragment);
 }
 
 /**
