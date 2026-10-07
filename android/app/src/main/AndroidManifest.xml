@@ -35,9 +35,17 @@
         </provider>
     </application>
 
-    <!-- Permissions -->
-
-    <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+      Deliberately no android.permission.INTERNET: this app is offline-only
+      by design (reads local SAF-granted files, never fetches anything), and
+      the Android kernel enforces this permission for every socket the app's
+      UID opens - including ones made through @capacitor/core's bundled
+      CapacitorHttp plugin (which is registered unconditionally by the
+      Capacitor bridge regardless of its "enabled" config flag; see
+      capacitor.config.ts). Without this permission, that plugin's
+      HttpURLConnection-based requests fail at the OS level rather than
+      relying on app-level JS not to make them.
+    -->
 
     <!--
       Belt-and-suspenders package-visibility declaration for the SAF pickers.
