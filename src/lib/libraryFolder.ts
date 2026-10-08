@@ -17,9 +17,39 @@ export interface SourceInfo {
   displayName: string;
 }
 
+export interface FailedSourceInfo {
+  source: LibrarySource;
+  /** Best-effort label derived from the URI itself - the real display name
+   *  normally comes from the scan that just failed, so there's nothing else
+   *  to show it. */
+  displayName: string;
+  reason: 'permission-revoked' | 'scan-failed';
+}
+
 export interface LibraryScanResult {
   sources: SourceInfo[];
   files: LibraryFile[];
+  failedSources: FailedSourceInfo[];
+}
+
+/**
+ * Best-effort, offline, no-native-call label for a source that failed to
+ * scan - a SAF URI's last path segment, decoded, e.g.
+ * "content://.../tree/primary%3ABooks" -> "Books". Never throws; falls back
+ * to the raw URI if it doesn't look like a normal SAF URI.
+ */
+function deriveFallbackName(uri: string): string {
+  try {
+    const decoded = decodeURIComponent(uri);
+    const lastSegment = decoded
+      .split(/[:/]/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .pop();
+    return lastSegment || uri;
+  } catch {
+    return uri;
+  }
 }
 
 interface LibraryFolderPlugin {
@@ -130,10 +160,14 @@ export async function removeSource(uri: string): Promise<void> {
 /**
  * Scans every persisted source in parallel. A source whose permission grant
  * was revoked outside the app (Settings > Apps), or that otherwise fails to
- * scan, is dropped from the persisted list on its own - one bad source no
- * longer wipes the whole library, unlike the single-folder model. Files from
- * every surviving source are merged and de-duplicated by uri (covers a file
- * that's both added directly and reachable via an added folder).
+ * scan, is kept in the persisted list - it's reported back via
+ * failedSources instead of being silently dropped, so the UI can show the
+ * user which source needs attention and let them remove it deliberately
+ * (one tap) rather than having it vanish on its own. One bad source still
+ * never affects any other source's scan or the files that did resolve.
+ * Files from every surviving source are merged and de-duplicated by uri
+ * (covers a file that's both added directly and reachable via an added
+ * folder).
  */
 export async function scanAllSources(): Promise<LibraryScanResult> {
   const sources = await getSources();
@@ -145,29 +179,25 @@ export async function scanAllSources(): Promise<LibraryScanResult> {
         const { granted } = await LibraryFolder.hasPersistedPermission({ uri: source.uri });
         if (!granted) {
           console.warn(LOG_TAG, 'scanAllSources: permission revoked for', source.uri);
-          return null;
+          return { ok: false as const, source, reason: 'permission-revoked' as const };
         }
 
         if (source.type === 'folder') {
           const { name, files } = await LibraryFolder.scanFolder({ uri: source.uri });
-          return { source, displayName: name, files };
+          return { ok: true as const, source, displayName: name, files };
         }
 
         const { file } = await LibraryFolder.statFile({ uri: source.uri });
-        return { source, displayName: file.name, files: [file] };
+        return { ok: true as const, source, displayName: file.name, files: [file] };
       } catch (err) {
         console.warn(LOG_TAG, 'scanAllSources: failed to scan source', source.uri, err);
-        return null;
+        return { ok: false as const, source, reason: 'scan-failed' as const };
       }
     }),
   );
 
-  const valid = scanned.filter((entry): entry is NonNullable<typeof entry> => entry !== null);
-
-  if (valid.length !== sources.length) {
-    console.log(LOG_TAG, 'scanAllSources: dropping', sources.length - valid.length, 'unreachable source(s)');
-    await saveSources(valid.map((entry) => entry.source));
-  }
+  const valid = scanned.filter((entry) => entry.ok) as Extract<(typeof scanned)[number], { ok: true }>[];
+  const failed = scanned.filter((entry) => !entry.ok) as Extract<(typeof scanned)[number], { ok: false }>[];
 
   const fileMap = new Map<string, LibraryFile>();
   for (const entry of valid) {
@@ -179,6 +209,11 @@ export async function scanAllSources(): Promise<LibraryScanResult> {
   return {
     sources: valid.map(({ source, displayName }) => ({ source, displayName })),
     files: Array.from(fileMap.values()),
+    failedSources: failed.map(({ source, reason }) => ({
+      source,
+      displayName: deriveFallbackName(source.uri),
+      reason,
+    })),
   };
 }
 

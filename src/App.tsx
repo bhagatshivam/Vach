@@ -11,6 +11,14 @@ type Screen = { name: 'library' } | { name: 'reader'; file: LibraryFile };
 function App() {
   const [screen, setScreen] = useState<Screen>({ name: 'library' });
   const screenRef = useRef(screen);
+  // Set by LibraryScreen while its sources sheet is open, cleared when it
+  // closes or LibraryScreen unmounts. A single hardware-back listener here
+  // (rather than a second one inside LibraryScreen) checks this first, so
+  // back-button handling always has exactly one place that decides what to
+  // do - the sheet closes on the first press instead of the app exiting
+  // (or the reader-vs-library logic below firing at the same time a second
+  // listener also handled the same press).
+  const sheetCloseRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     screenRef.current = screen;
@@ -18,6 +26,11 @@ function App() {
 
   useEffect(() => {
     const listenerPromise = CapacitorApp.addListener('backButton', () => {
+      if (sheetCloseRef.current) {
+        console.log('[App] hardware back button: closing sources sheet');
+        sheetCloseRef.current();
+        return;
+      }
       if (screenRef.current.name === 'reader') {
         console.log('[App] hardware back button: leaving reader, returning to library');
         setScreen({ name: 'library' });
@@ -41,7 +54,7 @@ function App() {
     );
   }
 
-  return <LibraryScreen onOpenBook={(file) => setScreen({ name: 'reader', file })} />;
+  return <LibraryScreen onOpenBook={(file) => setScreen({ name: 'reader', file })} sheetCloseRef={sheetCloseRef} />;
 }
 
 export default App;

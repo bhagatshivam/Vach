@@ -1,12 +1,17 @@
+/* Library (home) screen. Themed by the reader's own saved theme (sepia/
+   night/beige/custom), applied as an inline style on .library the same way
+   ReaderScreen themes .reader - not the app-wide index.css light/dark vars -
+   so the home screen and the reader read as one themed product instead of
+   switching palettes at the screen boundary. Borders throughout use the
+   same neutral rgba(128,128,128,N) convention already established in the
+   reader's own CSS (.icon-button, .reader-header) for the same reason: it
+   reads correctly against any of those themes without needing a dedicated
+   CSS variable per theme. */
+
 .library {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-}
-
-.library h1 {
-  margin: 0;
-  font-size: 32px;
+  min-height: 100svh;
 }
 
 .status {
@@ -16,6 +21,7 @@
 
 .error {
   color: var(--danger);
+  padding: 0 16px;
 }
 
 .reader-error-screen {
@@ -29,25 +35,340 @@
   text-align: center;
 }
 
-.actions {
+/* Header: wordmark + sources/settings entry point */
+
+.app-header {
   display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 16px 14px;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.25);
 }
 
-.actions button {
-  padding: 10px 16px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--accent);
-  color: #fff;
-  font-size: 15px;
+.wordmark {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.wordmark .devanagari {
+  font-family: 'Literata', Georgia, serif;
+  font-size: 26px;
+  font-weight: 700;
+}
+
+.wordmark .latin {
+  font-size: 12px;
+  opacity: 0.5;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.icon-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  background: transparent;
+  color: inherit;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 17px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.icon-btn:active {
+  opacity: 0.6;
+}
+
+/* Permission/scan-failure banner */
+
+.perm-banner {
+  margin: 10px 16px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(185, 28, 28, 0.4);
+  background: rgba(185, 28, 28, 0.1);
+  font-size: 12.5px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.perm-banner strong {
+  color: var(--danger);
+}
+
+.banner-remove-btn {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  background: transparent;
+  color: inherit;
+  font-size: 12.5px;
   cursor: pointer;
 }
 
-.library h2 {
-  margin: 0 0 8px;
+/* Empty state (first launch) */
+
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 14px;
+  padding: 40px 32px;
+}
+
+.empty-state .glyph {
+  font-size: 40px;
+  opacity: 0.35;
+}
+
+.empty-state h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.empty-state p {
+  margin: 0;
+  font-size: 13.5px;
+  opacity: 0.6;
+  max-width: 32ch;
+  line-height: 1.5;
+}
+
+.primary-btn {
+  padding: 11px 20px;
+  border-radius: 10px;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-size: 14.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Search */
+
+.search-wrap {
+  padding: 12px 16px 4px;
+}
+
+.search-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  opacity: 0.95;
+}
+
+.search-box svg {
+  flex-shrink: 0;
+  opacity: 0.6;
+}
+
+.search-box input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  outline: none;
+}
+
+.search-box input::placeholder {
+  color: inherit;
+  opacity: 0.55;
+}
+
+.clear-btn {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  opacity: 0.6;
   font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+/* Scanning indicator */
+
+.scan-row {
+  margin: 10px 16px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(128, 128, 128, 0.25);
+  font-size: 12.5px;
+  opacity: 0.7;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.spinner {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 2px solid rgba(128, 128, 128, 0.35);
+  border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Book list */
+
+.list-toolbar {
+  padding: 14px 16px 6px;
+  font-size: 13px;
+  opacity: 0.55;
+}
+
+.book-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 16px 24px;
+  display: flex;
+  flex-direction: column;
+}
+
+.book-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  /* Fixed-ish height (padding + one-line title + one-line subtitle, both
+     clamped to a single line by ellipsis below) keeps row height constant
+     regardless of content, which matters once this list holds a few
+     thousand rows. */
+  padding: 12px 4px;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.18);
+  cursor: pointer;
+}
+
+.book-row:last-child {
+  border-bottom: none;
+}
+
+.book-row:active {
+  opacity: 0.7;
+}
+
+.fmt-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 2px 6px;
+  border-radius: 5px;
+  flex-shrink: 0;
+  background: rgba(128, 128, 128, 0.18);
+}
+
+.fmt-badge.epub {
+  background: rgba(124, 58, 237, 0.18);
+  color: #7c3aed;
+}
+
+.fmt-badge.pdf {
+  background: rgba(185, 28, 28, 0.16);
+  color: var(--danger);
+}
+
+.book-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.book-title {
+  font-family: 'Literata', Georgia, serif;
+  font-size: 15.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.book-meta {
+  font-size: 12px;
+  opacity: 0.55;
+}
+
+.chev {
+  opacity: 0.3;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.empty {
+  opacity: 0.6;
+  padding: 0 16px;
+}
+
+/* Sources sheet */
+
+.sheet-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: flex-end;
+  z-index: 10;
+}
+
+.sheet {
+  width: 100%;
+  max-height: 80svh;
+  overflow-y: auto;
+  border-radius: 16px 16px 0 0;
+  border-top: 1px solid rgba(128, 128, 128, 0.3);
+  padding: 8px 16px 24px;
+}
+
+.sheet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0 12px;
+}
+
+.sheet-header h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.sheet-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.sheet-actions button {
+  padding: 10px 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  background: var(--accent);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
 }
 
 .source-list {
@@ -64,7 +385,7 @@
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
-  border: 1px solid var(--border);
+  border: 1px solid rgba(128, 128, 128, 0.25);
   border-radius: 8px;
 }
 
@@ -88,54 +409,11 @@
   flex-shrink: 0;
   padding: 6px 10px;
   border-radius: 6px;
-  border: 1px solid var(--border);
+  border: 1px solid rgba(128, 128, 128, 0.35);
   background: transparent;
-  color: var(--text);
+  color: inherit;
   font-size: 13px;
   cursor: pointer;
-}
-
-.file-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.file-list li {
-  display: flex;
-  flex-direction: column;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
-
-.file-list li.readable {
-  cursor: pointer;
-}
-
-.file-list li.readable:active {
-  opacity: 0.7;
-}
-
-.file-name {
-  font-weight: 600;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.file-path {
-  font-size: 12px;
-  opacity: 0.6;
-  word-break: break-all;
-}
-
-.empty {
-  opacity: 0.6;
 }
 
 /* Reader screen */
