@@ -1,7 +1,10 @@
 import JSZip from 'jszip';
 import DOMPurify from 'dompurify';
 
-export type ParseEvent = { type: 'title'; title: string } | { type: 'chapter'; html: string };
+export type ParseEvent =
+  | { type: 'title'; title: string }
+  | { type: 'total'; count: number }
+  | { type: 'chapter'; html: string };
 
 // Generous for a real chapter (even a 10MB chapter of plain XHTML text is
 // hundreds of thousands of words) but small enough to bound the cost of a
@@ -525,6 +528,13 @@ export async function* streamEpub(base64: string, fallbackTitle: string): AsyncG
   const { manifest, spineHrefs } = parseOpf(opfXml, opfDir);
   const title = extractTitle(opfXml) || fallbackTitle;
   yield { type: 'title', title };
+  // Known from the spine alone, before any chapter is actually parsed - lets
+  // a progress fraction and a "chapter N of M" restore indicator exist
+  // immediately, not just once streaming finishes. A spine entry that fails
+  // to resolve to a real zip file (skipped below, not yielded as a chapter)
+  // means the true yielded-chapter count can end up slightly under this -
+  // intentional: this is the book's own declared total, not a live count.
+  yield { type: 'total', count: spineHrefs.length };
 
   const manifestByHref = new Map<string, ManifestItem>();
   for (const item of manifest.values()) {

@@ -235,9 +235,88 @@
 /* Book list */
 
 .list-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   padding: 14px 16px 6px;
   font-size: 13px;
+}
+
+.list-toolbar .count {
   opacity: 0.55;
+}
+
+.sort-toggle {
+  display: flex;
+  border-radius: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  overflow: hidden;
+}
+
+.sort-toggle button {
+  padding: 5px 10px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  opacity: 0.6;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sort-toggle button + button {
+  border-left: 1px solid rgba(128, 128, 128, 0.3);
+}
+
+.sort-toggle button.active {
+  background: rgba(124, 58, 237, 0.16);
+  color: #7c3aed;
+  opacity: 1;
+  font-weight: 600;
+}
+
+/* "Continue reading" - above the search box, the single most-recently-opened
+   unfinished book. A plain full-width button, not a list item: this isn't
+   part of the sortable/searchable book list, just a shortcut back in. */
+.continue-reading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  margin: 10px 16px 0;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(124, 58, 237, 0.3);
+  background: rgba(124, 58, 237, 0.08);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.continue-label {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #7c3aed;
+}
+
+.continue-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Literata', Georgia, serif;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.continue-progress {
+  flex-shrink: 0;
+  font-size: 12px;
+  opacity: 0.6;
 }
 
 .book-list {
@@ -309,6 +388,26 @@
 .book-meta {
   font-size: 12px;
   opacity: 0.55;
+}
+
+.progress-track {
+  display: block;
+  height: 3px;
+  margin-top: 4px;
+  border-radius: 2px;
+  background: rgba(128, 128, 128, 0.22);
+  overflow: hidden;
+}
+
+.progress-track.invisible {
+  visibility: hidden;
+}
+
+.progress-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
 }
 
 .chev {
@@ -550,6 +649,68 @@
 
 .reader-content .chapter {
   margin-bottom: 2em;
+}
+
+/* Kept in the DOM (so a restore-in-progress can measure it) but visually
+   hidden until content is ready to show - either immediately, for a book
+   with no saved position, or once the restore overlay below has resolved
+   and scrolled to it. visibility (not display:none) preserves layout, which
+   is exactly what's needed to measure against. */
+.reader-content.pre-reveal {
+  visibility: hidden;
+}
+
+/* Restore overlay: covers the content area only, not the header, so Back
+   stays reachable if the user wants to abandon opening the book entirely
+   rather than wait or use "Start from beginning". */
+.restore-overlay {
+  position: fixed;
+  top: 56px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.restore-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+}
+
+.restore-box .spinner {
+  width: 22px;
+  height: 22px;
+  border-width: 3px;
+}
+
+.restore-text {
+  margin: 4px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.restore-progress {
+  margin: 0;
+  font-size: 13px;
+  opacity: 0.6;
+}
+
+.restore-skip-btn {
+  margin-top: 10px;
+  padding: 9px 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  background: transparent;
+  color: inherit;
+  font-size: 13.5px;
+  cursor: pointer;
 }
 
 .reader-content img {

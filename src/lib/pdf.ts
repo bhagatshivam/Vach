@@ -10,7 +10,10 @@ import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
-export type ParseEvent = { type: 'title'; title: string } | { type: 'chapter'; html: string };
+export type ParseEvent =
+  | { type: 'title'; title: string }
+  | { type: 'total'; count: number }
+  | { type: 'chapter'; html: string };
 
 interface PositionedTextItem {
   str: string;
@@ -162,6 +165,9 @@ export async function* streamPdf(base64: string, fallbackTitle: string): AsyncGe
   if (doc.numPages === 0) {
     throw new Error('This PDF has no pages');
   }
+  // doc.numPages is known the moment the document loads, before any page is
+  // actually extracted - same reasoning as streamEpub's 'total' event.
+  yield { type: 'total', count: doc.numPages };
 
   for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber++) {
     let html: string;

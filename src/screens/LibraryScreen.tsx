@@ -9,7 +9,8 @@ import {
   type SourceInfo,
 } from '../lib/libraryFolder';
 import { cleanTitle, detectFormat, matchesQuery } from '../lib/libraryText';
-import { compareCleanTitles } from '../lib/librarySort';
+import { DEFAULT_SORT_MODE, SORT_MODE_OPTIONS, loadSortMode, saveSortMode, sortFiles, type SortMode } from '../lib/librarySort';
+import { bookKey, ensureIndexLoaded, getProgressIndexSync, isFinished } from '../lib/readingPosition';
 import { DEFAULT_READER_SETTINGS, THEME_COLORS, getReaderSettings, type ReaderSettings } from '../lib/readerSettings';
 
 interface LibraryScreenProps {
@@ -44,17 +45,29 @@ function SearchIcon() {
 interface BookRowProps {
   file: LibraryFile;
   title: string;
+  /** undefined - never opened/no saved position, so no bar at all, not an empty one. */
+  progressFraction: number | undefined;
   onOpen: () => void;
 }
 
-function BookRow({ file, title, onOpen }: BookRowProps) {
+function BookRow({ file, title, progressFraction, onOpen }: BookRowProps) {
   const format = detectFormat(file.name);
+  const showProgress = typeof progressFraction === 'number' && progressFraction > 0;
+  const barPercent = showProgress ? (isFinished(progressFraction) ? 100 : Math.round(progressFraction * 100)) : 0;
   return (
     <li className="book-row" onClick={onOpen}>
       <span className={`fmt-badge${format ? ` ${format}` : ''}`}>{(format ?? '?').toUpperCase()}</span>
       <div className="book-main">
         <span className="book-title">{title}</span>
         <span className="book-meta">{format ? format.toUpperCase() : file.name}</span>
+        {/* Always rendered, not conditionally - a book-row's height must stay
+            identical whether or not it has progress, which matters once the
+            list holds a few thousand rows (see .book-row's own comment).
+            visibility:hidden (not a conditional render) reserves the exact
+            same space either way. */}
+        <span className={`progress-track${showProgress ? '' : ' invisible'}`} aria-hidden="true">
+          <span className="progress-fill" style={{ width: `${barPercent}%` }} />
+        </span>
       </div>
       <span className="chev" aria-hidden="true">
         &#8250;
@@ -73,10 +86,31 @@ export default function LibraryScreen({ onOpenBook, sheetCloseRef }: LibraryScre
   const [searchInput, setSearchInput] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [sortMode, setSortModeState] = useState<SortMode>(DEFAULT_SORT_MODE);
+  // Bumped whenever the shared in-memory progress index (readingPosition.ts)
+  // might have changed - it isn't React state itself, so reading it doesn't
+  // automatically trigger a re-render; this is just the signal to re-read it.
+  const [progressTick, setProgressTick] = useState(0);
 
   useEffect(() => {
     getReaderSettings().then(setSettings);
   }, []);
+
+  useEffect(() => {
+    loadSortMode().then(setSortModeState);
+  }, []);
+
+  useEffect(() => {
+    // Resolves immediately from the shared cache if the reader already
+    // loaded it this session (e.g. returning from a book just read) - no
+    // extra Preferences round trip in that case, per the "no re-read" design.
+    ensureIndexLoaded().then(() => setProgressTick((t) => t + 1));
+  }, []);
+
+  function handleSortModeChange(mode: SortMode) {
+    setSortModeState(mode);
+    saveSortMode(mode);
+  }
 
   const loadLibrary = useCallback(async () => {
     setScanning(true);
@@ -110,8 +144,39 @@ export default function LibraryScreen({ onOpenBook, sheetCloseRef }: LibraryScre
 
   const visibleFiles = useMemo(() => {
     const matched = filesWithTitle.filter((f) => matchesQuery(f.title, debouncedQuery));
-    return [...matched].sort((a, b) => compareCleanTitles(a.title, b.title));
-  }, [filesWithTitle, debouncedQuery]);
+    const titleByUri = new Map(matched.map((f) => [f.file.uri, f.title]));
+    const progressIndex = getProgressIndexSync();
+    const sorted = sortFiles(
+      matched.map((f) => f.file),
+      sortMode,
+      {
+        titleOf: (file) => titleByUri.get(file.uri) ?? file.name,
+        lastOpenedAt: (file) => progressIndex[bookKey(file)]?.lastOpenedAt,
+      },
+    );
+    return sorted.map((file) => ({
+      file,
+      title: titleByUri.get(file.uri) ?? file.name,
+      progressFraction: progressIndex[bookKey(file)]?.progressFraction,
+    }));
+    // progressTick isn't read directly here, but it's what signals that
+    // getProgressIndexSync() may now return something different.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filesWithTitle, debouncedQuery, sortMode, progressTick]);
+
+  const continueReading = useMemo(() => {
+    const progressIndex = getProgressIndexSync();
+    let best: { file: LibraryFile; title: string; progressFraction: number; lastOpenedAt: number } | null = null;
+    for (const { file, title } of filesWithTitle) {
+      const entry = progressIndex[bookKey(file)];
+      if (!entry || entry.progressFraction <= 0 || isFinished(entry.progressFraction)) continue;
+      if (!best || entry.lastOpenedAt > best.lastOpenedAt) {
+        best = { file, title, progressFraction: entry.progressFraction, lastOpenedAt: entry.lastOpenedAt };
+      }
+    }
+    return best;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filesWithTitle, progressTick]);
 
   async function handleAddFolder() {
     console.log('[LibraryScreen] handleAddFolder: button tapped');
@@ -191,6 +256,14 @@ export default function LibraryScreen({ onOpenBook, sheetCloseRef }: LibraryScre
 
       {error && <p className="error">{error}</p>}
 
+      {continueReading && (
+        <button className="continue-reading" onClick={() => onOpenBook(continueReading.file)}>
+          <span className="continue-label">Continue reading</span>
+          <span className="continue-title">{continueReading.title}</span>
+          <span className="continue-progress">{Math.round(continueReading.progressFraction * 100)}%</span>
+        </button>
+      )}
+
       {isFirstLaunchEmpty ? (
         <div className="empty-state">
           <div className="glyph" aria-hidden="true">
@@ -232,6 +305,17 @@ export default function LibraryScreen({ onOpenBook, sheetCloseRef }: LibraryScre
             <span className="count">
               {visibleFiles.length} book{visibleFiles.length === 1 ? '' : 's'}
             </span>
+            <div className="sort-toggle" role="group" aria-label="Sort order">
+              {SORT_MODE_OPTIONS.map((opt) => (
+                <button
+                  key={opt.id}
+                  className={sortMode === opt.id ? 'active' : ''}
+                  onClick={() => handleSortModeChange(opt.id)}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
           </div>
 
           {visibleFiles.length === 0 && !scanning ? (
@@ -240,8 +324,8 @@ export default function LibraryScreen({ onOpenBook, sheetCloseRef }: LibraryScre
             </p>
           ) : (
             <ul className="book-list">
-              {visibleFiles.map(({ file, title }) => (
-                <BookRow key={file.uri} file={file} title={title} onOpen={() => onOpenBook(file)} />
+              {visibleFiles.map(({ file, title, progressFraction }) => (
+                <BookRow key={file.uri} file={file} title={title} progressFraction={progressFraction} onOpen={() => onOpenBook(file)} />
               ))}
             </ul>
           )}
