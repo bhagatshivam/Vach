@@ -12,9 +12,9 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 // the double-handling (sheet closes *and* the app exits on one press) that
 // a single-callback stub can't see.
 vi.mock('@capacitor/app', () => {
-  const listeners = new Map<string, Array<() => void>>();
+  const listeners = new Map<string, Array<(data?: unknown) => void>>();
   const exitApp = vi.fn();
-  const addListener = vi.fn((eventName: string, cb: () => void) => {
+  const addListener = vi.fn((eventName: string, cb: (data?: unknown) => void) => {
     const arr = listeners.get(eventName) ?? [];
     arr.push(cb);
     listeners.set(eventName, arr);
@@ -29,26 +29,42 @@ vi.mock('@capacitor/app', () => {
   });
   return {
     App: { addListener, exitApp },
-    __notifyListeners: (eventName: string) => {
-      for (const cb of listeners.get(eventName) ?? []) cb();
+    // data is forwarded to every callback, same as Capacitor's real
+    // notifyListeners(eventName, data) - 'appStateChange' listeners expect
+    // an AppState payload ({isActive}), not a bare call.
+    __notifyListeners: (eventName: string, data?: unknown) => {
+      for (const cb of listeners.get(eventName) ?? []) cb(data);
     },
     __listenerCount: (eventName: string) => (listeners.get(eventName) ?? []).length,
   };
 });
 
 // LibraryScreen's native-plugin dependency - irrelevant to back-button
-// wiring, stubbed to an empty library so the screen renders its normal
-// (non-empty-state) chrome, which is what exposes the sources sheet/gear
-// button this test needs.
+// wiring for most tests here, but one test below actually opens a book (to
+// mount ReaderScreen, which is where appStateChange gets registered), so a
+// real file + a working readFileBase64 are included too.
 vi.mock('./lib/libraryFolder', () => ({
   scanAllSources: vi.fn(async () => ({
     sources: [{ source: { type: 'folder', uri: 'content://x' }, displayName: 'Books' }],
-    files: [],
+    files: [{ name: 'book.epub', uri: 'content://x/book.epub', path: 'book.epub', size: 1 }],
     failedSources: [],
   })),
   addFolderSource: vi.fn(async () => {}),
   addFileSources: vi.fn(async () => {}),
   removeSource: vi.fn(async () => {}),
+  readFileBase64: vi.fn(async () => 'dGVzdA=='),
+}));
+
+// ReaderScreen dynamically imports epub.ts/pdf.ts - mocked here (not real
+// parsing) purely so opening a book resolves quickly and deterministically,
+// with no saved position so content reveals immediately and the
+// appStateChange listener registers right away.
+vi.mock('./lib/epub', () => ({
+  streamEpub: async function* () {
+    yield { type: 'title', title: 'Test Book' };
+    yield { type: 'total', count: 1 };
+    yield { type: 'chapter', html: '<p>one paragraph</p>' };
+  },
 }));
 
 afterEach(() => {
@@ -120,5 +136,37 @@ describe('hardware back button + sources sheet (realistic multi-listener simulat
 
     act(() => __notifyListeners('backButton'));
     expect(CapacitorApp.exitApp).toHaveBeenCalledTimes(1);
+  });
+
+  it('with a book open (appStateChange now also registered by ReaderScreen): backButton count stays 1, appStateChange never fires exitApp, and backButton never fires an appStateChange handler', async () => {
+    await renderApp();
+    const bookRow = await screen.findByText('book');
+    fireEvent.click(bookRow);
+
+    // Wait for the reader to actually mount and reveal content (no saved
+    // position for this book, so reveal is immediate) - this is the point
+    // at which ReaderScreen's appStateChange effect registers.
+    await screen.findByText('one paragraph');
+
+    const { __listenerCount, __notifyListeners, App: CapacitorApp } = (await import('@capacitor/app')) as unknown as {
+      __listenerCount: (e: string) => number;
+      __notifyListeners: (e: string, data?: unknown) => void;
+      App: { exitApp: ReturnType<typeof vi.fn> };
+    };
+
+    expect(__listenerCount('backButton')).toBe(1);
+    expect(__listenerCount('appStateChange')).toBe(1);
+
+    // Firing appStateChange (app backgrounded) must not touch backButton's
+    // job - exitApp must not be called just because the app backgrounded.
+    act(() => __notifyListeners('appStateChange', { isActive: false }));
+    expect(CapacitorApp.exitApp).not.toHaveBeenCalled();
+
+    // Firing backButton from inside the reader navigates back to the
+    // library (the existing reader-vs-library branch), not exitApp, and
+    // must not be affected by appStateChange's listener existing alongside it.
+    act(() => __notifyListeners('backButton'));
+    expect(CapacitorApp.exitApp).not.toHaveBeenCalled();
+    expect(await screen.findByLabelText('Sources and settings')).toBeTruthy();
   });
 });
