@@ -769,17 +769,6 @@
   line-height: 1.4;
 }
 
-/* PDF milestone: a page with no extractable text (image-only - covers,
-   illustrations, scanned pages) gets this visible marker rather than
-   silently vanishing from the reading flow. Real image rendering for these
-   is Phase 3; this just avoids pretending nothing was skipped. */
-.reader-content .pdf-page-gap {
-  font-style: italic;
-  opacity: 0.55;
-  font-size: 0.9em;
-  text-align: center;
-}
-
 /* Progressive-loading milestone: shown a chapter/page failed to parse
    (per-chapter error isolation) so one bad chapter doesn't take down the
    rest of the book. */
@@ -799,4 +788,84 @@
   font-size: 0.9em;
   text-align: center;
   padding: 24px 0;
+}
+
+/* PDF Milestone 2 (M2a): a rasterized page's placeholder. aspect-ratio
+   (computed from page.getViewport({scale:1}), see buildPagePlaceholder in
+   pdf.ts) reserves the box's final height up front, before the lazy loader
+   ever fills in a real <img src> - this is what keeps the reading-position
+   anchor system (readerAnchor.ts) correct around these: a block's height
+   never changes after being measured, image or not. The faint background
+   is the empty/not-yet-rendered look; it's intentionally left in place
+   under the image too (rather than cleared once loaded) as a subtle seam
+   around a page that doesn't fully fill its reserved box (e.g. a slightly
+   off aspect ratio from the resolution cap's rounding). */
+.reader-content .pdf-page {
+  margin: 0 0 1em;
+  width: 100%;
+  background: rgba(128, 128, 128, 0.08);
+}
+
+.reader-content .pdf-page-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* Scan tinting: a scanned page's background is usually stark white, which
+   reads as a harsh, out-of-place rectangle against a tinted paper theme.
+   multiply blends the image against whatever's already painted behind it
+   in this stacking context - the theme's own background color, set as an
+   inline style up on .reader - so white areas pick up the paper tint
+   instead of standing out. Deliberately scoped to sepia/beige only: a
+   custom theme's colors are user-chosen and could be either light or dark,
+   so there's no single correct treatment to assume for it here. */
+.reader[data-theme='sepia'] .pdf-page-img,
+.reader[data-theme='beige'] .pdf-page-img {
+  mix-blend-mode: multiply;
+}
+
+/* Night theme: dimming alone (brightness) softens a scan's glare without
+   inverting its colors (global invert was explicitly rejected - it would
+   wreck any color photo/illustration on the same page); the added border
+   gives the page a visible edge against the near-black background, since a
+   dimmed-but-still-light rectangle otherwise reads as a glowing panel with
+   no defined boundary. Screenshotted alongside an invert-only alternative
+   for a scanned *text* page specifically (see the Milestone 2 verification
+   report) - dim+frame is what's shipped; invert is not wired in anywhere. */
+.reader[data-theme='night'] .pdf-page {
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+}
+
+.reader[data-theme='night'] .pdf-page-img {
+  filter: brightness(0.8);
+}
+
+/* Scanned-book notice: a dismissible, non-blocking banner (see the
+   rolling-window detection in ReaderScreen.tsx) - sits below the header,
+   above the reading content, so it doesn't shift already-visible text when
+   it appears mid-stream. */
+.scanned-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  margin: 0 0 8px;
+  font-size: 13px;
+  opacity: 0.85;
+  background: rgba(128, 128, 128, 0.12);
+}
+
+.scanned-notice-dismiss {
+  flex-shrink: 0;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  background: transparent;
+  color: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
 }

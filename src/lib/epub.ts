@@ -494,11 +494,24 @@ async function sanitizeChapterHtml(
   await convertSvgImagesToImg(doc, chapterDir, resolveImage);
   await resolveImgSrcs(doc, chapterDir, resolveImage);
 
-  const fragment = DOMPurify.sanitize(doc.body?.innerHTML ?? '', {
+  return sanitizePlainFragment(doc.body?.innerHTML ?? '');
+}
+
+/**
+ * The same default-deny allowlist pass as sanitizeChapterHtml above, minus
+ * the EPUB-specific image-resolution step - for markup that was never built
+ * from an untrusted zip entry in the first place (pdf.ts's reconstructed
+ * page text, built entirely via escapeHtml()) but is routed through this
+ * anyway as defense in depth, per the same "default-deny, not a place to
+ * special-case one caller as exempt" reasoning as the rest of this file.
+ * Shared with pdf.ts rather than duplicated, so there's one allowlist, one
+ * style-sanitizer, one wrapWideElements - not two copies to keep in sync.
+ */
+export function sanitizePlainFragment(rawHtml: string): string {
+  const fragment = DOMPurify.sanitize(rawHtml, {
     ...DOMPURIFY_CONFIG,
     RETURN_DOM_FRAGMENT: true,
   });
-
   return wrapWideElements(fragment);
 }
 

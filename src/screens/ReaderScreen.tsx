@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { App as CapacitorApp } from '@capacitor/app';
 import { readFileBase64, type LibraryFile } from '../lib/libraryFolder';
+import type { PageKind, ParseEvent, PdfHandle } from '../lib/pdf';
+import { PdfPageLoader } from '../lib/pdfPageLoader';
+import { pushKind, shouldShowScannedNotice } from '../lib/scannedNotice';
 import {
   computeAnchor,
   computeProgressFraction,
@@ -62,17 +65,23 @@ const FONT_WAIT_TIMEOUT_MS = 2000;
 // Dynamic imports here, not static ones: pdf.js (~2.2MB worker alone) and
 // jszip only need to load when a book of that actual format is opened, not
 // as part of the app's initial bundle every time - the production build
-// flagged the combined bundle size once pdf.js was added statically. The
-// dynamic import happens inside the generator body, so it still only runs
-// once the generator is actually iterated, not merely constructed.
-async function* streamBook(base64: string, fileName: string) {
+// flagged the combined bundle size once pdf.js was added statically.
+//
+// Unlike EPUB's plain generator, a PDF needs its PDFDocumentProxy (wrapped
+// in PdfHandle) kept alive past the initial streaming pass, for later
+// on-demand page rasterization - so this returns the handle alongside the
+// generator instead of just yielding straight through it.
+async function openBookStream(
+  base64: string,
+  fileName: string,
+): Promise<{ generator: AsyncGenerator<ParseEvent>; pdfHandle: PdfHandle | null }> {
   if (fileName.toLowerCase().endsWith('.pdf')) {
-    const { streamPdf } = await import('../lib/pdf');
-    yield* streamPdf(base64, fileName);
-    return;
+    const { openPdf } = await import('../lib/pdf');
+    const handle = await openPdf(base64, fileName);
+    return { generator: handle.streamChapters(), pdfHandle: handle };
   }
   const { streamEpub } = await import('../lib/epub');
-  yield* streamEpub(base64, fileName);
+  return { generator: streamEpub(base64, fileName), pdfHandle: null };
 }
 
 const NAV_IDLE_MS = 3000;
@@ -112,13 +121,22 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
   const anchorRef = useRef<Anchor | null>(null);
   const progressFractionRef = useRef(0);
 
+  // --- PDF-specific: on-demand page rasterization ---
+  // null for an EPUB (or before the handle is ready); set once openBookStream
+  // resolves for a PDF, kept alive until this effect's cleanup destroys it.
+  const pdfHandleRef = useRef<PdfHandle | null>(null);
+  const pageLoaderRef = useRef<PdfPageLoader | null>(null);
+  const pageKindWindowRef = useRef<PageKind[]>([]);
+  const scannedNoticeDismissedRef = useRef(false);
+  const [scannedNoticeVisible, setScannedNoticeVisible] = useState(false);
+
   useEffect(() => {
     getReaderSettings().then(setSettings);
   }, []);
 
   useEffect(() => {
     let cancelled = false;
-    let generator: AsyncGenerator<{ type: 'title'; title: string } | { type: 'total'; count: number } | { type: 'chapter'; html: string }> | null = null;
+    let generator: AsyncGenerator<ParseEvent> | null = null;
 
     // Reset restore state for this specific file - a fresh mount-equivalent
     // each time `file` changes (App.tsx actually unmounts/remounts this
@@ -127,9 +145,12 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
     restoreStartedRef.current = false;
     anchorRef.current = null;
     progressFractionRef.current = 0;
+    pageKindWindowRef.current = [];
+    scannedNoticeDismissedRef.current = false;
     setRestoreTarget(null);
     setContentRevealed(false);
     setTotalChapters(null);
+    setScannedNoticeVisible(false);
 
     async function load() {
       setStatus('Opening book...');
@@ -156,7 +177,13 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
         console.log('[ReaderScreen] load: read', base64.length, 'base64 chars, parsing', file.name);
         setStatus('Parsing...');
 
-        generator = streamBook(base64, file.name);
+        const opened = await openBookStream(base64, file.name);
+        if (cancelled) {
+          opened.pdfHandle?.destroy();
+          return;
+        }
+        pdfHandleRef.current = opened.pdfHandle;
+        generator = opened.generator;
         let title = file.name;
         const initialChapters: string[] = [];
         let revealed = false;
@@ -170,6 +197,13 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
           if (event.type === 'total') {
             setTotalChapters(event.count);
             continue;
+          }
+          // Scanned-book detection: only PDF chapter events carry pageKind
+          // at all (epub's ParseEvent has no such field), so this is a
+          // no-op for an EPUB.
+          if (event.pageKind && !scannedNoticeDismissedRef.current) {
+            pageKindWindowRef.current = pushKind(pageKindWindowRef.current, event.pageKind);
+            if (shouldShowScannedNotice(pageKindWindowRef.current)) setScannedNoticeVisible(true);
           }
           if (savedPosition) {
             // Restoring: every chapter is appended as it arrives, not
@@ -222,6 +256,15 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
       // of continuing to parse chapters nobody will ever see, e.g. when the
       // user backs out of a book mid-load.
       generator?.return(undefined);
+      // PDF lifecycle: the lazy-page loader owns cancelling any in-flight
+      // RenderTask; the PDFDocumentProxy itself (kept alive specifically
+      // for on-demand rasterization - see openBookStream) is only released
+      // here, on this effect's cleanup (unmount, or `file` changing to a
+      // different book).
+      pageLoaderRef.current?.destroy();
+      pageLoaderRef.current = null;
+      pdfHandleRef.current?.destroy();
+      pdfHandleRef.current = null;
       // Unmount flush: uses whatever anchor was last computed/cached rather
       // than re-measuring, since by the time this runs the DOM this effect
       // owns may already be gone.
@@ -233,6 +276,31 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [file]);
+
+  // --- PDF-specific: lazy windowed rendering of page-image placeholders ---
+  // Runs once content is actually visible (contentRevealed - restoring is
+  // done, or there was nothing to restore) and only when this book is a PDF
+  // (pdfHandleRef.current is null for an EPUB). Re-scans on every new batch
+  // of streamed-in chapters, since each one may have added new
+  // `.pdf-page` placeholders that aren't observed yet - scan() itself
+  // skips anything already known, so this is cheap to call repeatedly.
+  useEffect(() => {
+    if (!contentRevealed || !pdfHandleRef.current || !contentRef.current) return;
+    const handle = pdfHandleRef.current;
+    if (!pageLoaderRef.current) {
+      pageLoaderRef.current = new PdfPageLoader({
+        container: contentRef.current,
+        renderPageImage: (pageNumber, viewportWidthPx, devicePixelRatio) =>
+          handle.renderPageImage(pageNumber, viewportWidthPx, devicePixelRatio),
+      });
+    }
+    pageLoaderRef.current.scan();
+  }, [contentRevealed, book?.chaptersHtml.length]);
+
+  function dismissScannedNotice() {
+    scannedNoticeDismissedRef.current = true;
+    setScannedNoticeVisible(false);
+  }
 
   // --- Resolving the restore target once it's available ---
   useEffect(() => {
@@ -425,7 +493,7 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
   const restoreParsedSoFar = Math.min(book?.chaptersHtml.length ?? 0, restoreTargetChapterNumber);
 
   return (
-    <div className="reader" style={{ background: themeColors.background, color: themeColors.text }}>
+    <div className="reader" data-theme={settings.theme} style={{ background: themeColors.background, color: themeColors.text }}>
       <header
         className={`reader-header${navVisible ? '' : ' hidden'}`}
         style={{ background: themeColors.background, color: themeColors.text }}
@@ -534,6 +602,15 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
 
       {status && <p className="status">{status}</p>}
       {error && <p className="error">{error}</p>}
+
+      {scannedNoticeVisible && (
+        <div className="scanned-notice" role="status">
+          <span>This looks like a scanned book - pages show as images, so font and size controls won't apply to them.</span>
+          <button className="scanned-notice-dismiss" onClick={dismissScannedNotice}>
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {showRestoreOverlay && (
         <div className="restore-overlay" style={{ background: themeColors.background, color: themeColors.text }}>
