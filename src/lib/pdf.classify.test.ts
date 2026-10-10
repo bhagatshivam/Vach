@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PDFPageProxy } from 'pdfjs-dist';
-import { sanitizePlainFragment } from './epub';
+import { sanitizePlainTextOnly } from './epub';
 import {
   buildPagePlaceholder,
   classifyAndRenderPage,
@@ -242,23 +242,23 @@ describe('classifyAndRenderPage (the real per-page decision pdf.ts streams)', ()
 
 describe('text output routed through DOMPurify (hardening, no behavior change for legitimate text)', () => {
   it('escaped entities survive the sanitize pass unchanged', () => {
-    const html = sanitizePlainFragment('<p>5 &lt; 10 &amp; 10 &gt; 5, allegedly</p>');
+    const html = sanitizePlainTextOnly('<p>5 &lt; 10 &amp; 10 &gt; 5, allegedly</p>');
     expect(html).toContain('5 &lt; 10 &amp; 10 &gt; 5, allegedly');
     expect(html).not.toContain('5 < 10');
   });
 
   it('a plain reconstructed-text paragraph round-trips exactly', () => {
-    const html = sanitizePlainFragment('<p>Just a normal paragraph of real body text here.</p>');
+    const html = sanitizePlainTextOnly('<p>Just a normal paragraph of real body text here.</p>');
     expect(html).toBe('<p>Just a normal paragraph of real body text here.</p>');
   });
 
   it('a heading survives as <h2>', () => {
-    const html = sanitizePlainFragment('<h2>Chapter Title</h2>');
+    const html = sanitizePlainTextOnly('<h2>Chapter Title</h2>');
     expect(html).toBe('<h2>Chapter Title</h2>');
   });
 
   it('still strips anything outside the allowlist, even though pdf.ts never emits it today - defense in depth, not a behavior change', () => {
-    const html = sanitizePlainFragment('<p>safe<script>window.__pwn(1)</script></p>');
+    const html = sanitizePlainTextOnly('<p>safe<script>window.__pwn(1)</script></p>');
     expect(html.toLowerCase()).not.toContain('<script');
     expect(html).toContain('safe');
   });

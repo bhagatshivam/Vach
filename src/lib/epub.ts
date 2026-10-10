@@ -516,6 +516,20 @@ export function sanitizePlainFragment(rawHtml: string): string {
 }
 
 /**
+ * Same allowlist and sanitize() call as sanitizePlainFragment, but for
+ * content that provably never contains a <table> or <pre> - pdf.ts's
+ * reconstructed page text only ever emits <h2>/<p>, built entirely through
+ * escapeHtml() (see reconstructPage in pdf.ts), so wrapWideElements's own
+ * table/pre scan can never find anything to wrap there. Skipping it, along
+ * with the RETURN_DOM_FRAGMENT + manual re-serialization round trip it
+ * exists to support, means DOMPurify's own (faster) direct string-return
+ * mode runs instead - same output for this content, less work to get it.
+ */
+export function sanitizePlainTextOnly(rawHtml: string): string {
+  return DOMPurify.sanitize(rawHtml, DOMPURIFY_CONFIG);
+}
+
+/**
  * Streams an EPUB's title and chapters as they become available, instead of
  * fully parsing the book before returning anything. This lets ReaderScreen
  * show the first chapters as soon as they're ready and keep loading the

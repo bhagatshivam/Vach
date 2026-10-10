@@ -1,29 +1,49 @@
-import * as pdfjsLib from 'pdfjs-dist';
-import { OPS, type PDFDocumentProxy, type PDFPageProxy } from 'pdfjs-dist';
-// `?url` is Vite's explicit static-asset import: it copies this file into
-// the build output with a content hash and hands back that URL as a plain
-// string, instead of trying to execute it as a module. This is what keeps
-// the pdf.js worker fully local - verified against a real production build
-// (no dev-server-only behavior) that this pulls in zero CDN/network
-// references; pdf.js examples commonly load this worker from unpkg/cdnjs,
-// which would silently violate this app's offline requirement.
-//
-// Points at this project's own tiny wrapper (pdfWorkerEntry.ts), not
-// directly at pdfjs-dist's own worker file - the wrapper installs the
-// Map.prototype.getOrInsertComputed polyfill inside the worker's own realm
-// before pdf.worker.mjs's module body runs (see mapUpsertPolyfill.ts for
-// why this is needed in real production Chromium, not just a sandbox
-// quirk). Vite still fully bundles/hashes it like any other built module -
-// `?url` isn't limited to pre-built/static files.
+// The "legacy" build, not the main 'pdfjs-dist' entry - it bundles its own
+// core-js-based self-polyfills for the very new built-ins pdf.js v6 uses
+// internally (Map.prototype.getOrInsertComputed, Math.sumPrecise - see
+// pdfCompatPolyfills.ts for the full story and why this app also keeps its
+// own redundant polyfills on top). The main build has none of that
+// compatibility-shim infrastructure at all. API and worker MUST come from
+// the same build - pdf.js throws a version-mismatch error between a
+// legacy API and a non-legacy worker (or vice versa), so both imports
+// below point at the legacy tree.
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { OPS, type PDFDocumentProxy, type PDFPageProxy } from 'pdfjs-dist/legacy/build/pdf.mjs';
+// `?worker&url` bundles this project's own tiny wrapper (pdfWorkerEntry.ts)
+// as a proper worker chunk and gives back its URL - not pdfjs-dist's own
+// worker file directly, since the wrapper installs this app's own
+// (redundant, defensive) polyfills inside the worker's own realm before
+// pdf.worker.mjs's module body runs. Fully local - verified against a real
+// production build that this pulls in zero CDN/network references.
 import pdfWorkerUrl from './pdfWorkerEntry.ts?worker&url';
-import { sanitizePlainFragment } from './epub';
-import { installMapUpsertPolyfill } from './mapUpsertPolyfill';
+import { sanitizePlainTextOnly } from './epub';
+import { detectPdfCompatGaps, installPdfCompatPolyfills } from './pdfCompatPolyfills';
 
-// Same polyfill, installed on the MAIN thread too: PDFPageProxy's own
+// Logged once, main thread only - the worker's own copy of this check logs
+// from pdfWorkerEntry.ts, since it's a separate realm with its own
+// available/missing built-ins. Console only, never surfaced in the UI;
+// exists purely so a report of a real device actually hitting either gap
+// (despite the legacy build + both polyfills) is diagnosable via
+// chrome://inspect without needing the device in hand.
+{
+  const gaps = detectPdfCompatGaps();
+  if (gaps.getOrInsertComputedMissing || gaps.sumPreciseMissing) {
+    console.log(
+      '[pdf] main-thread compat check - natively missing:',
+      [gaps.getOrInsertComputedMissing && 'Map.prototype.getOrInsertComputed', gaps.sumPreciseMissing && 'Math.sumPrecise']
+        .filter(Boolean)
+        .join(', '),
+      '| userAgent:',
+      navigator.userAgent,
+    );
+  }
+}
+
+// Same polyfills, installed on the MAIN thread too: PDFPageProxy's own
 // request-deduplication caches (e.g. the one getOperatorList/render check
 // before ever messaging the worker) live here, in a separate JS realm from
-// the worker - each needs its own copy of this method.
-installMapUpsertPolyfill();
+// the worker - each needs its own copy.
+installPdfCompatPolyfills();
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -337,7 +357,7 @@ export async function classifyAndRenderPage(page: PDFPageProxy, pageNumber: numb
   }
 
   const rawHtml = reconstructPage(items);
-  const html = rawHtml ? sanitizePlainFragment(rawHtml) : '';
+  const html = rawHtml ? sanitizePlainTextOnly(rawHtml) : '';
   return { html, pageKind: html ? 'text' : 'blank' };
 }
 
