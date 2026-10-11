@@ -1,6 +1,21 @@
 apply plugin: 'com.android.application'
 apply plugin: 'org.jetbrains.kotlin.android'
 
+// Release signing comes only from environment variables (set by
+// .github/workflows/release.yml from repository secrets) - the keystore and
+// its passwords are never committed. If any of them is missing, the release
+// build type simply has no signingConfig and assembleRelease produces an
+// unsigned APK; debug builds are unaffected either way. Keystores made by
+// keytool default to PKCS12, which has a single password, so
+// VACH_KEY_PASSWORD must equal VACH_KEYSTORE_PASSWORD.
+def releaseKeystorePath = System.getenv('VACH_KEYSTORE_FILE')
+def hasReleaseSigning = [
+    releaseKeystorePath,
+    System.getenv('VACH_KEYSTORE_PASSWORD'),
+    System.getenv('VACH_KEY_ALIAS'),
+    System.getenv('VACH_KEY_PASSWORD'),
+].every { it } && file(releaseKeystorePath).isFile()
+
 android {
     namespace = "com.vach.reader"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -17,8 +32,31 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile file(releaseKeystorePath)
+                storePassword System.getenv('VACH_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('VACH_KEY_ALIAS')
+                keyPassword System.getenv('VACH_KEY_PASSWORD')
+            }
+        }
+    }
     buildTypes {
+        debug {
+            // Lets the debug build install side by side with the release
+            // build. Everything keyed on the package name follows
+            // automatically: the FileProvider authority and androidx's
+            // DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION both use
+            // ${applicationId} in their manifests, and Capacitor builds the
+            // authority from getPackageName() at runtime. The launcher label
+            // comes from src/debug/res/values/strings.xml.
+            applicationIdSuffix ".debug"
+        }
         release {
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }

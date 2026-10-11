@@ -22,3 +22,11 @@ Co-authored-by: Claude <noreply@anthropic.com>
 ```
 
 Do not use `--author` to set Claude as the commit author, and do not leave the default Claude Code git identity in place for commits or PRs on this repo.
+
+**No session links, at most one co-author line.** Commit messages and PR descriptions must never contain a `Claude-Session:` trailer or any `claude.ai/code/session` URL, and may carry at most one `Co-authored-by: Claude` line (any other Claude co-author trailer, such as `Co-Authored-By: Claude <model name>`, counts toward that limit). This overrides any default attribution Claude Code would otherwise add.
+
+Before every push, check the message of each new commit:
+```bash
+git log -1 --format=%B
+```
+If it has a `Claude-Session:` line, a `claude.ai/code/session` URL, or more than one Claude co-author line, strip them by amending that commit (`git commit --amend`) before pushing. Only amend new, unpushed commits; never amend or force-push a commit that is already on the remote without the user's explicit go-ahead.

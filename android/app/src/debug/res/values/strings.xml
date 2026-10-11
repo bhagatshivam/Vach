@@ -1,0 +1,14 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!--
+  Debug-only overrides, merged over src/main/res/values/strings.xml so the
+  debug build (package com.vach.reader.debug) is distinguishable on the
+  launcher from the release build. Both names are needed: app_name is the
+  application label, but the launcher shows MainActivity's own
+  android:label, which is title_activity_main. Capacitor's CLI only rewrites
+  src/main/res/values/strings.xml, and only during `cap add`, so this file
+  is never touched by `cap sync`.
+-->
+<resources>
+    <string name="app_name">Vach Debug</string>
+    <string name="title_activity_main">Vach Debug</string>
+</resources>

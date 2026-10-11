@@ -1,0 +1,8 @@
+# SHA-256 fingerprint of the Vach release signing certificate.
+# The release workflow fails unless the APK's signer matches this value.
+# It is public (the README shows the same value), not a secret.
+#
+# Replace UNSET below with the "SHA256:" line printed by:
+#   keytool -list -v -keystore vach-release.jks -alias vach
+# The "SHA256:" prefix, colons, spaces and letter case don't matter.
+UNSET
