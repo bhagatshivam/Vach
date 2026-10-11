@@ -2,7 +2,7 @@
 
 > Marathi for "Read" (imperative of वाचणे) — a native Android app for reading a personal offline library of PDF and EPUB novels and light novels.
 
-**Status:** Pre-build — planning complete, implementation not started
+**Status:** Phases 1–3 built and passing real-device testing — SAF folder access, EPUB/PDF continuous-scroll reading, font/theme controls, reading-position memory, and PDF image-page fallback (textless/scanned pages) all working fully offline. M2b (extracting embedded images from otherwise text-bearing PDF pages) is not started.
 **Platform:** Android (native, sideloaded APK — no Play Store distribution for now)
 
 ---
@@ -122,9 +122,9 @@ The whole point of Phase 1 is that folder access survives restarts and reboots w
 
 ## Roadmap
 
-- [ ] **Phase 1 — Skeleton:** Capacitor scaffold, SAF folder-picker + persistent permission, GitHub Actions build pipeline producing an installable APK. *Success = a real app icon that lists files from a chosen folder, even with a placeholder reading UI.*
-- [ ] **Phase 2 — Reading core:** EPUB reflow rendering, PDF text-extraction reflow, font/size/line-height/theme controls, smooth continuous scroll.
-- [ ] **Phase 3 — Iteration & fallback path:** Image-page fallback with theme overlay, reading progress persistence, real-world testing against actual library files.
+- [x] **Phase 1 — Skeleton:** Capacitor scaffold, SAF folder-picker + persistent permission, GitHub Actions build pipeline producing an installable APK. *Success = a real app icon that lists files from a chosen folder, even with a placeholder reading UI.*
+- [x] **Phase 2 — Reading core:** EPUB reflow rendering, PDF text-extraction reflow, font/size/line-height/theme controls, smooth continuous scroll.
+- [x] **Phase 3 — Iteration & fallback path:** Image-page fallback with theme overlay, reading progress persistence, real-world testing against actual library files. *Textless/scanned PDF pages (M2a) rasterize inline; extracting embedded images from otherwise text-bearing pages (M2b) is a further refinement not yet started.*
 - [ ] **Phase 4 (optional):** Per-book settings override, in-book search, custom font uploads, cloud sync via Supabase.
 
 ---
