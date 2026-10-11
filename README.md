@@ -81,14 +81,39 @@ A web app was considered first but rejected: browsers can't get **persistent** a
 - **PDF:** [pdf.js](https://mozilla.github.io/pdf.js/) for text extraction and rasterizing image-only pages.
 - **EPUB:** Direct unzip + XHTML/OPF parsing (no external EPUB library expected to be necessary).
 - **App state:** Local on-device storage only (SQLite via Capacitor plugin, or JSON/local storage) for library index, reading progress, and settings.
-- **Build pipeline:** GitHub Actions builds the release/debug APK on push (Android SDK preinstalled on GitHub's runners); APK downloaded from build artifacts and sideloaded.
+- **Build pipeline:** GitHub Actions (Android SDK preinstalled on GitHub's runners) builds a debug APK on every branch push, and a release-signed APK on every `v*` tag, which is published as a GitHub Release.
+
+---
+
+## Download
+
+**[Download Vach.apk](https://github.com/bhagatshivam/Vach/releases/latest/download/Vach.apk)** — always the newest release.
+
+Open the link on your Android phone, tap to download, then open the file and allow installs from this source (your browser or file manager) when Android asks.
+
+- **Requires Android 7.0 or newer.**
+- **Chrome may warn** that this type of file can harm your device — tap **Download anyway**.
+- **Play Protect may say the app isn't scanned / is from an unknown developer** — tap **More details → Install anyway**.
+- This is a personal, sideloaded app. **There is no Play Store build.**
+
+**Verify the download (optional):** every release is signed with the same key. Its certificate SHA-256 is:
+
+```
+Not published yet - set when the first release is signed.
+```
+
+Check an APK against it with `apksigner verify --print-certs Vach.apk` (from the Android SDK build-tools); the `Signer #1 certificate SHA-256 digest` line must match. Each release's notes also list the SHA-256 of the APK file itself.
+
+> **For developers:** builds from the GitHub Actions workflow on every branch push are debug builds with package `com.vach.reader.debug`, labelled **Vach Debug**. They install side by side with the release build and support `chrome://inspect`. Debug builds made before that change used the release package name `com.vach.reader`; uninstall such a build before installing a release, since Android won't replace an app signed with a different key. How releases are cut is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ---
 
 ## Building & Running
 
 ### Get the APK
-Every push triggers the `Android build` GitHub Actions workflow, which builds a debug APK and uploads it as a workflow artifact (`vach-debug-apk`) — download it from the Actions run summary and sideload it (enable "Install unknown apps" for whichever app you use to open the file).
+Release builds: see [Download](#download) above.
+
+Debug builds: every branch push triggers the `Android build` GitHub Actions workflow, which builds a debug APK (`com.vach.reader.debug`) and uploads it as a workflow artifact (`vach-debug-apk`) — download it from the Actions run summary (requires a GitHub login) and sideload it.
 
 ### Build locally
 Requires Node 20+ and a JDK 17+; the Android SDK itself is fetched by Gradle, so a machine with normal internet access (not a sandboxed one blocked from `dl.google.com`) is needed.

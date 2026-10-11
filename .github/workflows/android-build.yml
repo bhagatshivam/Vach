@@ -1,7 +1,9 @@
 name: Android build
 
 on:
+  # Branches only: version tags (v*) are built and published by release.yml.
   push:
+    branches: ['**']
   workflow_dispatch:
 
 permissions:
@@ -89,6 +91,12 @@ jobs:
             exit 1
           fi
           echo "Confirmed: no INTERNET permission in the merged manifest"
+
+      # The debug build carries applicationIdSuffix ".debug" so it installs
+      # next to the release build; this checks that everything derived from
+      # the package name followed it.
+      - name: Verify debug package identity
+        run: .github/scripts/verify-apk-identity.sh android/app/build/outputs/apk/debug/app-debug.apk com.vach.reader.debug "Vach Debug"
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4

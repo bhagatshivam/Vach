@@ -1,0 +1,415 @@
+name: Release
+
+# Pushing a v* tag builds the release-signed APK, runs every guard below, and
+# publishes it as a GitHub Release with a stable asset name (Vach.apk), so
+# https://github.com/bhagatshivam/Vach/releases/latest/download/Vach.apk
+# always points at the newest stable build. Tags with a suffix
+# (v1.2.3-rc1) publish as pre-releases, which /latest deliberately skips.
+#
+# Running it by hand (workflow_dispatch) is a dry run: it builds the release
+# APK and runs every guard that doesn't need a tag, and never publishes.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and verify release APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      IS_TAG: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history and tags, for the tag-on-main and previous-tag checks.
+          fetch-depth: 0
+
+      - name: Set output directory
+        run: echo "OUT_DIR=$RUNNER_TEMP/release" >> "$GITHUB_ENV"
+
+      - name: Check no signing keys are tracked in git
+        run: |
+          set -euo pipefail
+          tracked=$(git ls-files | grep -iE '\.(jks|keystore|p12|pfx|pem)$' || true)
+          if [ -n "$tracked" ]; then
+            echo "::error::Key material is committed to the repository: $tracked"
+            exit 1
+          fi
+          echo "Confirmed: no keystore or key files are tracked"
+
+      - name: Read version from build.gradle
+        id: version
+        run: |
+          set -euo pipefail
+          gradle=android/app/build.gradle
+          name=$(sed -nE 's/^[[:space:]]*versionName[[:space:]]+"([^"]+)".*/\1/p' "$gradle")
+          code=$(sed -nE 's/^[[:space:]]*versionCode[[:space:]]+([0-9]+).*/\1/p' "$gradle")
+          if [[ -z "$name" || "$name" == *$'\n'* || -z "$code" || "$code" == *$'\n'* ]]; then
+            echo "::error::Expected exactly one versionName and one versionCode in $gradle"
+            exit 1
+          fi
+          echo "versionName=$name versionCode=$code"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Guard - tag matches versionName, is annotated, and is on main
+        if: env.IS_TAG == 'true'
+        env:
+          TAG: ${{ github.ref_name }}
+          VERSION_NAME: ${{ steps.version.outputs.name }}
+        run: |
+          set -euo pipefail
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+          if ! [[ "$TAG" =~ $re ]]; then
+            echo "::error::Tag $TAG is not of the form v1.2.3 or v1.2.3-suffix"
+            exit 1
+          fi
+          if [ "${TAG#v}" != "$VERSION_NAME" ]; then
+            echo "::error::Tag $TAG does not match versionName \"$VERSION_NAME\" in android/app/build.gradle (expected tag v$VERSION_NAME)"
+            exit 1
+          fi
+          # actions/checkout can turn an annotated tag into a lightweight
+          # one locally; re-fetch the real tag object before inspecting it.
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          if [ "$(git cat-file -t "refs/tags/$TAG")" != "tag" ]; then
+            echo "::error::Tag $TAG is a lightweight tag; its message is the release notes, so create it with: git tag -a $TAG -m \"...\""
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "refs/tags/$TAG^{commit}" origin/main; then
+            echo "::error::Tag $TAG points at a commit that is not on main"
+            exit 1
+          fi
+          mkdir -p "$OUT_DIR"
+          git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' "refs/tags/$TAG" > "$OUT_DIR/tag-notes.md"
+          echo "Confirmed: $TAG matches versionName $VERSION_NAME, is annotated, and is on main"
+
+      - name: Guard - versionCode increased since the previous tag
+        env:
+          VERSION_CODE: ${{ steps.version.outputs.code }}
+        run: |
+          set -euo pipefail
+          prev=$(git describe --tags --abbrev=0 --match 'v*' HEAD^ 2>/dev/null || true)
+          if [ -z "$prev" ]; then
+            echo "No earlier v* tag in this commit's history - nothing to compare versionCode $VERSION_CODE against, skipping"
+            exit 0
+          fi
+          prev_code=$(git show "$prev:android/app/build.gradle" | sed -nE 's/^[[:space:]]*versionCode[[:space:]]+([0-9]+).*/\1/p' | head -1)
+          if [ -z "$prev_code" ]; then
+            echo "::warning::Could not read versionCode from $prev's build.gradle, skipping"
+            exit 0
+          fi
+          if [ "$VERSION_CODE" -le "$prev_code" ]; then
+            echo "::error::versionCode $VERSION_CODE is not higher than $prev_code from $prev - Android would refuse it as an update"
+            exit 1
+          fi
+          echo "Confirmed: versionCode $VERSION_CODE > $prev_code ($prev)"
+
+      - name: Check signing secrets
+        id: secrets
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "$KEYSTORE_B64" ] || missing+=(ANDROID_KEYSTORE_BASE64)
+          [ -n "$STORE_PASSWORD" ] || missing+=(ANDROID_KEYSTORE_PASSWORD)
+          [ -n "$KEY_ALIAS" ] || missing+=(ANDROID_KEY_ALIAS)
+          [ -n "$KEY_PASSWORD" ] || missing+=(ANDROID_KEY_PASSWORD)
+          if [ ${#missing[@]} -gt 0 ]; then
+            if [ "$IS_TAG" = "true" ]; then
+              echo "::error::Signing secrets not set: ${missing[*]} - refusing to publish an unsigned APK"
+              exit 1
+            fi
+            echo "::warning::Signing secrets not set: ${missing[*]} - dry run continues with an unsigned APK, so the signing guard will fail"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$STORE_PASSWORD" != "$KEY_PASSWORD" ]; then
+            echo "::error::ANDROID_KEY_PASSWORD must equal ANDROID_KEYSTORE_PASSWORD (PKCS12 keystores have a single password)"
+            exit 1
+          fi
+          echo "All four signing secrets are set"
+          echo "present=true" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install web dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit -p .
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run tests
+        run: npm run test
+
+      - name: Build web assets
+        run: npm run build
+
+      - name: Sync Capacitor Android project
+        run: npx cap sync android
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      # Decoded outside the workspace so it can never be swept into an
+      # artifact; removed again right after the build.
+      - name: Decode release keystore
+        if: steps.secrets.outputs.present == 'true'
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/vach-release.jks"
+          echo "VACH_KEYSTORE_FILE=$RUNNER_TEMP/vach-release.jks" >> "$GITHUB_ENV"
+
+      # Passwords reach Gradle only as environment variables that
+      # android/app/build.gradle reads - never as -P arguments on the
+      # command line.
+      - name: Build release APK
+        working-directory: android
+        env:
+          VACH_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          VACH_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          VACH_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Remove release keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/vach-release.jks"
+
+      - name: Collect APK as Vach.apk
+        id: apk
+        run: |
+          set -euo pipefail
+          dir=android/app/build/outputs/apk/release
+          ls -l "$dir"
+          if [ -f "$dir/app-release.apk" ]; then
+            src="$dir/app-release.apk"
+          elif [ -f "$dir/app-release-unsigned.apk" ]; then
+            src="$dir/app-release-unsigned.apk"
+          else
+            echo "::error::No release APK found in $dir"
+            exit 1
+          fi
+          mkdir -p "$OUT_DIR"
+          cp "$src" "$OUT_DIR/Vach.apk"
+          echo "Collected $src as $OUT_DIR/Vach.apk"
+
+      # The guards below all run even if an earlier one fails, so a single
+      # run (especially a dry run) reports every problem at once.
+      - name: Guard - no INTERNET permission in merged manifest
+        if: ${{ !cancelled() && steps.apk.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          APK="$OUT_DIR/Vach.apk"
+          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          AAPT2=$(find "$SDK_ROOT/build-tools" -name aapt2 -type f | sort -V | tail -1)
+          if [ -z "$AAPT2" ]; then
+            echo "::error::Could not locate aapt2 under $SDK_ROOT/build-tools"
+            exit 1
+          fi
+          echo "=== Permissions in merged manifest ($APK) ==="
+          "$AAPT2" dump permissions "$APK"
+          if "$AAPT2" dump permissions "$APK" | grep -q "android.permission.INTERNET"; then
+            echo "::error::android.permission.INTERNET is present in the merged manifest - this app must stay network-incapable at the OS level"
+            exit 1
+          fi
+          echo "Confirmed: no INTERNET permission in the merged manifest"
+
+      - name: Guard - release package identity
+        if: ${{ !cancelled() && steps.apk.outcome == 'success' }}
+        run: .github/scripts/verify-apk-identity.sh "$OUT_DIR/Vach.apk" com.vach.reader "Vach"
+
+      - name: Guard - APK contents (no source maps, keys, or debug flags)
+        if: ${{ !cancelled() && steps.apk.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          APK="$OUT_DIR/Vach.apk"
+          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          AAPT2=$(find "$SDK_ROOT/build-tools" -name aapt2 -type f | sort -V | tail -1)
+          fail=0
+          echo "=== Every file in $APK ==="
+          unzip -l "$APK"
+          entries=$(unzip -Z1 "$APK")
+          if ! grep -qx 'assets/public/index.html' <<<"$entries"; then
+            echo "::error::assets/public/index.html is missing - the web bundle was not packaged"
+            fail=1
+          fi
+          bad=$(grep -iE '\.map$|\.(jks|keystore|p12|pfx|pem)$|(^|/)\.env|(^|/)local\.properties$' <<<"$entries" || true)
+          if [ -n "$bad" ]; then
+            echo "::error::Files that must not ship are in the APK: $bad"
+            fail=1
+          fi
+          extract=$(mktemp -d)
+          unzip -q "$APK" 'assets/public/*' -d "$extract"
+          maps=$(grep -rlE '[#@] sourceMappingURL=' "$extract" || true)
+          if [ -n "$maps" ]; then
+            echo "::error::sourceMappingURL references found in: $maps"
+            fail=1
+          fi
+          if "$AAPT2" dump badging "$APK" | grep -q '^application-debuggable'; then
+            echo "::error::The release APK is marked debuggable"
+            fail=1
+          fi
+          if [ "$fail" -ne 0 ]; then
+            exit 1
+          fi
+          echo "Confirmed: web bundle present; no source maps, sourceMappingURL comments, key files, .env or local.properties; not debuggable"
+
+      - name: Guard - signed with the release key
+        id: signer
+        if: ${{ !cancelled() && steps.apk.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          APK="$OUT_DIR/Vach.apk"
+          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          APKSIGNER=$(find "$SDK_ROOT/build-tools" -name apksigner -type f | sort -V | tail -1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "::error::Could not locate apksigner under $SDK_ROOT/build-tools"
+            exit 1
+          fi
+          fail=0
+          expected=$(grep -vE '^[[:space:]]*(#|$)' .github/release-cert.sha256 | head -1 | sed -E 's/^[[:space:]]*SHA-?256:?//I' | tr -d ': \t\r' | tr 'A-F' 'a-f')
+          if ! [[ "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Release certificate fingerprint not set yet - .github/release-cert.sha256 still holds a placeholder. Put the SHA256 line from 'keytool -list -v -keystore vach-release.jks -alias vach' in it."
+            fail=1
+          fi
+          echo "=== apksigner verify --print-certs ==="
+          if ! out=$("$APKSIGNER" verify --verbose --print-certs --min-sdk-version 24 "$APK" 2>&1); then
+            echo "$out"
+            echo "::error::The APK is not signed, or its signature does not verify"
+            exit 1
+          fi
+          echo "$out"
+          if [ "$(grep -cE '^Signer #[0-9]+ certificate SHA-256 digest:' <<<"$out")" -ne 1 ]; then
+            echo "::error::Expected exactly one signer"
+            exit 1
+          fi
+          actual=$(sed -nE 's/^Signer #1 certificate SHA-256 digest: ([0-9a-f]+)$/\1/p' <<<"$out")
+          dn=$(sed -nE 's/^Signer #1 certificate DN: (.*)$/\1/p' <<<"$out")
+          pretty=$(sed 's/../&:/g; s/:$//' <<<"$actual" | tr 'a-f' 'A-F')
+          echo "Signer certificate DN:      $dn"
+          echo "Signer certificate SHA-256: $pretty"
+          if grep -qi 'CN=Android Debug' <<<"$dn"; then
+            echo "::error::The APK is signed with an Android debug key"
+            fail=1
+          fi
+          if [ "$fail" -eq 0 ] && [ "$actual" != "$expected" ]; then
+            echo "::error::Signer certificate does not match .github/release-cert.sha256 - wrong keystore in the secrets?"
+            fail=1
+          fi
+          if [ "$fail" -ne 0 ]; then
+            exit 1
+          fi
+          echo "cert=$pretty" >> "$GITHUB_OUTPUT"
+          echo "Confirmed: signed only by the release key"
+
+      - name: Write checksum and release notes
+        env:
+          CERT: ${{ steps.signer.outputs.cert }}
+        run: |
+          set -euo pipefail
+          cd "$OUT_DIR"
+          sha256sum Vach.apk > Vach.apk.sha256
+          apk_sha=$(cut -d' ' -f1 Vach.apk.sha256)
+          {
+            if [ -f tag-notes.md ]; then
+              cat tag-notes.md
+            else
+              echo "Dry run of $GITHUB_SHA - not published."
+            fi
+            echo
+            echo "---"
+            echo
+            echo "**Download:** \`Vach.apk\` below. Requires Android 7.0 or newer."
+            echo
+            echo "**APK SHA-256:** \`$apk_sha\`"
+            echo
+            echo "**Signing certificate SHA-256:** \`$CERT\`"
+          } > notes.md
+          cat notes.md
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: vach-release-apk
+          path: |
+            ${{ runner.temp }}/release/Vach.apk
+            ${{ runner.temp }}/release/Vach.apk.sha256
+            ${{ runner.temp }}/release/notes.md
+          if-no-files-found: error
+          retention-days: ${{ env.IS_TAG == 'true' && 1 || 7 }}
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    # The only job with write access. It has no signing secrets and no
+    # checkout - just the verified APK from the build job.
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified APK
+        uses: actions/download-artifact@v4
+        with:
+          name: vach-release-apk
+          path: release
+
+      - name: Create GitHub Release
+        working-directory: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Stable tags become the "latest" release (what the
+          # /releases/latest/download/Vach.apk link serves); suffixed tags
+          # are pre-releases and leave that link alone.
+          if [[ "$TAG" == *-* ]]; then
+            flags=(--prerelease --latest=false)
+          else
+            flags=(--latest)
+          fi
+          gh release create "$TAG" Vach.apk Vach.apk.sha256 \
+            --repo "$REPO" \
+            --verify-tag \
+            --title "Vach ${TAG#v}" \
+            --notes-file notes.md \
+            "${flags[@]}"
