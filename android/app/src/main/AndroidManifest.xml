@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme">
+
+        <activity
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density"
+            android:name=".MainActivity"
+            android:label="@string/title_activity_main"
+            android:theme="@style/AppTheme.NoActionBarLaunch"
+            android:launchMode="singleTask"
+            android:exported="true">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+        </activity>
+
+        <!--
+          Kept, even though nothing in this app's own code calls
+          FileProvider.getUriForFile - @capacitor/android's own core bridge
+          (BridgeWebChromeClient.java, the WebView's file-chooser/camera-
+          capture handler) calls it with exactly this "<packageName>.
+          fileprovider" authority, so removing this provider would crash
+          that path the moment any <input type="file"> content ever
+          triggers it, even though nothing in this app currently renders
+          one. Confirmed by grepping @capacitor/android's bundled source
+          (not just our own code) before deciding to keep it.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths"></meta-data>
+        </provider>
+    </application>
+
+    <!--
+      Deliberately no android.permission.INTERNET: this app is offline-only
+      by design (reads local SAF-granted files, never fetches anything), and
+      the Android kernel enforces this permission for every socket the app's
+      UID opens - including ones made through @capacitor/core's bundled
+      CapacitorHttp plugin (which is registered unconditionally by the
+      Capacitor bridge regardless of its "enabled" config flag; see
+      capacitor.config.ts). Without this permission, that plugin's
+      HttpURLConnection-based requests fail at the OS level rather than
+      relying on app-level JS not to make them.
+    -->
+
+    <!--
+      Belt-and-suspenders package-visibility declaration for the SAF pickers.
+      Both actions are documented as exempt from Android 11+
+      package-visibility filtering, but some OEM builds have been
+      inconsistent about honoring that exemption, so declare them explicitly.
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.OPEN_DOCUMENT_TREE" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.OPEN_DOCUMENT" />
+        </intent>
+    </queries>
+</manifest>

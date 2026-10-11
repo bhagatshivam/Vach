@@ -1,0 +1,441 @@
+package com.vach.reader
+
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.DocumentsContract
+import android.util.Base64
+import android.util.Log
+import androidx.activity.result.ActivityResult
+import androidx.documentfile.provider.DocumentFile
+import com.getcapacitor.JSArray
+import com.getcapacitor.JSObject
+import com.getcapacitor.Plugin
+import com.getcapacitor.PluginCall
+import com.getcapacitor.PluginMethod
+import com.getcapacitor.annotation.ActivityCallback
+import com.getcapacitor.annotation.CapacitorPlugin
+
+private const val TAG = "LibraryFolderPlugin"
+private val SUPPORTED_EXTENSIONS = setOf("pdf", "epub")
+
+// 150MB: generous for a real EPUB/PDF (even image-heavy ones are usually
+// well under 100MB) but small enough to avoid OOM once this gets
+// base64-encoded for the bridge - the raw bytes, the base64 string (a JVM
+// String is UTF-16, so ~2x its own char count on top of the ~1.33x base64
+// already adds), and the serialized call payload are all in memory at
+// once, on a typical Android app heap (192-512MB without
+// android:largeHeap, which this app doesn't set).
+private const val MAX_READABLE_FILE_BYTES = 150L * 1024 * 1024
+
+/**
+ * Validates that [uri] is a content:// URI this app currently holds a
+ * persisted *read* permission for - either an exact grant on this document
+ * (a directly-picked file source) or a grant on an ancestor tree (a folder
+ * source, where every document somewhere inside that tree is covered by
+ * the one grant on the tree root). Returns a human-readable rejection
+ * reason if the URI isn't usable, or null if it's safe to proceed.
+ *
+ * This is deliberately a single, small, top-level (not a Plugin method)
+ * function so it can be unit-tested directly against a fake Context/Uri
+ * later, without needing a running Capacitor bridge. It exists because
+ * ContentResolver.openInputStream/DocumentFile will happily act on *any*
+ * well-formed Uri they're given, including a file:// URI into this app's
+ * own private storage (which never goes through the SAF permission-grant
+ * system at all, since that system only governs content:// URIs) - without
+ * this check, the only thing stopping readFile/statFile/scanFolder from
+ * reading anything the app process can read is that nothing is currently
+ * asking them to.
+ */
+fun validateGrantedUri(context: Context, uri: Uri): String? {
+    if (uri.scheme != "content") {
+        return "Unsupported URI scheme: ${uri.scheme}"
+    }
+
+    val isGranted = context.contentResolver.persistedUriPermissions.any { perm ->
+        perm.isReadPermission && (perm.uri == uri || isWithinGrantedTree(perm.uri, uri))
+    }
+    if (!isGranted) {
+        return "This file is not covered by a granted permission"
+    }
+    return null
+}
+
+/**
+ * True if [candidateUri] is the tree [grantedTreeUri] itself, or a document
+ * somewhere inside it. Folder grants are SAF tree URIs; every document
+ * inside one shares its authority and has a document id that is the tree's
+ * own document id, or that id plus a "/"-prefixed suffix - checked with an
+ * explicit boundary (not a bare string prefix) so a sibling folder whose
+ * name happens to start with the same characters (e.g. a granted "Books"
+ * tree and an ungranted sibling "BooksOther") never false-matches.
+ */
+private fun isWithinGrantedTree(grantedTreeUri: Uri, candidateUri: Uri): Boolean {
+    if (grantedTreeUri.authority != candidateUri.authority) return false
+    if (!DocumentsContract.isTreeUri(grantedTreeUri)) return false
+
+    return try {
+        val treeDocId = DocumentsContract.getTreeDocumentId(grantedTreeUri)
+        val candidateDocId = DocumentsContract.getDocumentId(candidateUri)
+        candidateDocId == treeDocId || candidateDocId.startsWith("$treeDocId/")
+    } catch (e: Exception) {
+        false
+    }
+}
+
+@CapacitorPlugin(name = "LibraryFolder")
+class LibraryFolderPlugin : Plugin() {
+
+    override fun load() {
+        Log.d(TAG, "load() - plugin instance created and attached to bridge")
+    }
+
+    @PluginMethod
+    fun pickFolder(call: PluginCall) {
+        Log.d(TAG, "pickFolder() called from JS")
+
+        // FLAG_GRANT_PERSISTABLE_URI_PERMISSION belongs here, on the intent that
+        // requests the grant — it tells the system this grant may later be made
+        // permanent. It must NOT also be passed to takePersistableUriPermission()
+        // below: that call's modeFlags only ever accepts READ/WRITE (the modes to
+        // persist), never PERSISTABLE itself. The two calls read-only: request just
+        // READ, no WRITE, since this app never writes to the library folder.
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        Log.d(TAG, "pickFolder() built intent action=${intent.action}")
+
+        // Deliberately no resolveActivity() pre-check here: it returns null
+        // not only when nothing can handle the intent, but also when *multiple*
+        // apps can (Files, Drive, an OEM file manager, ...) and the user hasn't
+        // set a default — which is the common case on a real device. Attempt
+        // the launch directly and only treat an actual ActivityNotFoundException
+        // as "nothing can handle this".
+        try {
+            Log.d(TAG, "pickFolder() calling startActivityForResult")
+            startActivityForResult(call, intent, "handleFolderPicked")
+            Log.d(TAG, "pickFolder() startActivityForResult returned (launcher.launch invoked)")
+        } catch (e: ActivityNotFoundException) {
+            Log.e(TAG, "pickFolder() no activity found for ACTION_OPEN_DOCUMENT_TREE", e)
+            call.reject("No app available on this device to pick a folder", e)
+        } catch (e: Exception) {
+            Log.e(TAG, "pickFolder() threw while launching picker", e)
+            call.reject("Failed to launch folder picker: ${e.message}", e)
+        }
+    }
+
+    @ActivityCallback
+    private fun handleFolderPicked(call: PluginCall?, result: ActivityResult) {
+        Log.d(TAG, "handleFolderPicked() resultCode=${result.resultCode} data=${result.data}")
+
+        if (call == null) {
+            Log.e(TAG, "handleFolderPicked() no saved PluginCall to resolve/reject against")
+            return
+        }
+
+        val uri = result.data?.data
+        if (result.resultCode != android.app.Activity.RESULT_OK || uri == null) {
+            Log.w(TAG, "handleFolderPicked() cancelled or missing uri (resultCode=${result.resultCode})")
+            call.reject("Folder selection was cancelled")
+            return
+        }
+
+        Log.d(TAG, "handleFolderPicked() got uri=$uri, taking persistable permission")
+        try {
+            // modeFlags here must match the modes actually granted on this uri
+            // (READ, since that's all pickFolder()'s launch intent above requested)
+            // and must never include FLAG_GRANT_PERSISTABLE_URI_PERMISSION itself -
+            // that flag has no meaning as a "mode" to persist, only as a request on
+            // the launch intent. Passing it here throws
+            // "Requested flags 0x41, but only 0x3 are allowed" - it did until this
+            // fix, always, on every device, since 0x41 is never a valid mode.
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "handleFolderPicked() takePersistableUriPermission failed", e)
+            call.reject("Failed to persist folder access: ${e.message}", e)
+            return
+        }
+
+        Log.d(TAG, "handleFolderPicked() permission persisted, resolving call")
+        val ret = JSObject()
+        ret.put("uri", uri.toString())
+        call.resolve(ret)
+    }
+
+    @PluginMethod
+    fun pickFiles(call: PluginCall) {
+        Log.d(TAG, "pickFiles() called from JS")
+
+        // Broad type + EXTRA_MIME_TYPES isn't used here: many file managers/cloud
+        // providers don't tag .epub as application/epub+zip, so a strict MIME
+        // filter risks hiding legitimate files from the picker. Accept anything
+        // openable and filter by extension on the results instead, consistent
+        // with how folder scanning already filters (see collectLibraryFiles).
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        Log.d(TAG, "pickFiles() built intent action=${intent.action}")
+
+        try {
+            Log.d(TAG, "pickFiles() calling startActivityForResult")
+            startActivityForResult(call, intent, "handleFilesPicked")
+            Log.d(TAG, "pickFiles() startActivityForResult returned")
+        } catch (e: ActivityNotFoundException) {
+            Log.e(TAG, "pickFiles() no activity found for ACTION_OPEN_DOCUMENT", e)
+            call.reject("No app available on this device to pick files", e)
+        } catch (e: Exception) {
+            Log.e(TAG, "pickFiles() threw while launching picker", e)
+            call.reject("Failed to launch file picker: ${e.message}", e)
+        }
+    }
+
+    @ActivityCallback
+    private fun handleFilesPicked(call: PluginCall?, result: ActivityResult) {
+        Log.d(TAG, "handleFilesPicked() resultCode=${result.resultCode}")
+
+        if (call == null) {
+            Log.e(TAG, "handleFilesPicked() no saved PluginCall to resolve/reject against")
+            return
+        }
+
+        if (result.resultCode != android.app.Activity.RESULT_OK) {
+            Log.w(TAG, "handleFilesPicked() cancelled (resultCode=${result.resultCode})")
+            call.reject("File selection was cancelled")
+            return
+        }
+
+        // EXTRA_ALLOW_MULTIPLE results land in clipData when more than one file
+        // was picked, but clipData can be null even with multi-select enabled if
+        // the user picked exactly one - that single result comes back in data
+        // instead. Both paths need handling.
+        val data = result.data
+        val uris = mutableListOf<Uri>()
+        val clipData = data?.clipData
+        if (clipData != null) {
+            for (i in 0 until clipData.itemCount) {
+                clipData.getItemAt(i)?.uri?.let { uris.add(it) }
+            }
+        } else {
+            data?.data?.let { uris.add(it) }
+        }
+        Log.d(TAG, "handleFilesPicked() picked ${uris.size} uri(s)")
+
+        val accepted = mutableListOf<String>()
+        for (uri in uris) {
+            val name = DocumentFile.fromSingleUri(context, uri)?.name
+            if (name == null) {
+                Log.w(TAG, "handleFilesPicked() could not resolve name for $uri, skipping")
+                continue
+            }
+
+            val extension = name.substringAfterLast('.', "").lowercase()
+            if (extension !in SUPPORTED_EXTENSIONS) {
+                Log.d(TAG, "handleFilesPicked() skipping unsupported file: $name")
+                continue
+            }
+
+            try {
+                // Same READ-only pattern as handleFolderPicked() above, and for the
+                // same reason: PERSISTABLE is never a valid modeFlags bit here.
+                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                accepted.add(uri.toString())
+            } catch (e: Exception) {
+                Log.e(TAG, "handleFilesPicked() takePersistableUriPermission failed for $uri", e)
+            }
+        }
+        Log.d(TAG, "handleFilesPicked() accepted ${accepted.size} of ${uris.size} picked file(s)")
+
+        val ret = JSObject()
+        ret.put("uris", JSArray(accepted))
+        call.resolve(ret)
+    }
+
+    @PluginMethod
+    fun statFile(call: PluginCall) {
+        val uriString = call.getString("uri")
+        Log.d(TAG, "statFile() uri=$uriString")
+        if (uriString == null) {
+            call.reject("Missing 'uri' parameter")
+            return
+        }
+
+        val uri = Uri.parse(uriString)
+        val validationError = validateGrantedUri(context, uri)
+        if (validationError != null) {
+            Log.e(TAG, "statFile() rejected $uriString: $validationError")
+            call.reject(validationError)
+            return
+        }
+
+        try {
+            val doc = DocumentFile.fromSingleUri(context, uri)
+            val name = doc?.name
+            if (doc == null || name == null || !doc.exists()) {
+                Log.e(TAG, "statFile() file no longer accessible: $uriString")
+                call.reject("File is no longer accessible")
+                return
+            }
+
+            val file = JSObject()
+            file.put("name", name)
+            file.put("uri", uri.toString())
+            file.put("path", name)
+            file.put("size", doc.length())
+            Log.d(TAG, "statFile() resolved name=$name size=${doc.length()}")
+
+            val ret = JSObject()
+            ret.put("file", file)
+            call.resolve(ret)
+        } catch (t: Throwable) {
+            Log.e(TAG, "statFile() failed for $uriString", t)
+            call.reject("File is no longer accessible")
+        }
+    }
+
+    @PluginMethod
+    fun readFile(call: PluginCall) {
+        val uriString = call.getString("uri")
+        Log.d(TAG, "readFile() uri=$uriString")
+        if (uriString == null) {
+            call.reject("Missing 'uri' parameter")
+            return
+        }
+
+        val uri = Uri.parse(uriString)
+        val validationError = validateGrantedUri(context, uri)
+        if (validationError != null) {
+            Log.e(TAG, "readFile() rejected $uriString: $validationError")
+            call.reject(validationError)
+            return
+        }
+
+        try {
+            // Checked before opening a stream, not just after reading, so an
+            // oversized file is rejected without ever materializing its bytes.
+            // DocumentFile.length() can legitimately come back 0 if the
+            // provider doesn't report a size up front - the post-read check
+            // below is the backstop for that case, not a second check of the
+            // same thing.
+            val knownSize = DocumentFile.fromSingleUri(context, uri)?.length() ?: 0L
+            if (knownSize > MAX_READABLE_FILE_BYTES) {
+                Log.e(TAG, "readFile() file too large ($knownSize bytes): $uriString")
+                call.reject("File is too large to open (over ${MAX_READABLE_FILE_BYTES / (1024 * 1024)}MB)")
+                return
+            }
+
+            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            if (bytes == null) {
+                Log.e(TAG, "readFile() openInputStream returned null for $uriString")
+                call.reject("Could not open file for reading")
+                return
+            }
+            if (bytes.size > MAX_READABLE_FILE_BYTES) {
+                Log.e(TAG, "readFile() file too large after read (${bytes.size} bytes): $uriString")
+                call.reject("File is too large to open (over ${MAX_READABLE_FILE_BYTES / (1024 * 1024)}MB)")
+                return
+            }
+            Log.d(TAG, "readFile() read ${bytes.size} byte(s), encoding to base64")
+
+            val ret = JSObject()
+            ret.put("base64", Base64.encodeToString(bytes, Base64.NO_WRAP))
+            call.resolve(ret)
+        } catch (e: OutOfMemoryError) {
+            Log.e(TAG, "readFile() out of memory reading $uriString", e)
+            call.reject("File is too large to open")
+        } catch (t: Throwable) {
+            Log.e(TAG, "readFile() failed for $uriString", t)
+            call.reject("Failed to read file: ${t.message}")
+        }
+    }
+
+    @PluginMethod
+    fun hasPersistedPermission(call: PluginCall) {
+        val uriString = call.getString("uri")
+        Log.d(TAG, "hasPersistedPermission() uri=$uriString")
+        if (uriString == null) {
+            call.reject("Missing 'uri' parameter")
+            return
+        }
+
+        val granted = context.contentResolver.persistedUriPermissions.any {
+            it.uri.toString() == uriString && it.isReadPermission
+        }
+        Log.d(TAG, "hasPersistedPermission() granted=$granted")
+
+        val ret = JSObject()
+        ret.put("granted", granted)
+        call.resolve(ret)
+    }
+
+    @PluginMethod
+    fun scanFolder(call: PluginCall) {
+        val uriString = call.getString("uri")
+        Log.d(TAG, "scanFolder() uri=$uriString")
+        if (uriString == null) {
+            call.reject("Missing 'uri' parameter")
+            return
+        }
+
+        val treeUri = Uri.parse(uriString)
+        val validationError = validateGrantedUri(context, treeUri)
+        if (validationError != null) {
+            Log.e(TAG, "scanFolder() rejected $uriString: $validationError")
+            call.reject(validationError)
+            return
+        }
+
+        try {
+            // DocumentFile.fromTreeUri throws IllegalArgumentException for a
+            // Uri that isn't actually a tree Uri (malformed input) - this
+            // method's whole body needs to tolerate that rather than crash,
+            // same as any other unexpected provider failure here.
+            val root = DocumentFile.fromTreeUri(context, treeUri)
+            if (root == null || !root.isDirectory) {
+                Log.e(TAG, "scanFolder() folder no longer accessible: $uriString")
+                call.reject("Folder is no longer accessible")
+                return
+            }
+
+            val results = JSArray()
+            collectLibraryFiles(root, "", results)
+            Log.d(TAG, "scanFolder() found ${results.length()} matching file(s)")
+
+            val ret = JSObject()
+            ret.put("name", root.name ?: uriString)
+            ret.put("files", results)
+            call.resolve(ret)
+        } catch (t: Throwable) {
+            Log.e(TAG, "scanFolder() failed for $uriString", t)
+            call.reject("Folder is no longer accessible")
+        }
+    }
+
+    private fun collectLibraryFiles(dir: DocumentFile, relativePath: String, results: JSArray) {
+        for (entry in dir.listFiles()) {
+            val name = entry.name ?: continue
+            val entryPath = if (relativePath.isEmpty()) name else "$relativePath/$name"
+
+            if (entry.isDirectory) {
+                collectLibraryFiles(entry, entryPath, results)
+                continue
+            }
+
+            val extension = name.substringAfterLast('.', "").lowercase()
+            if (extension !in SUPPORTED_EXTENSIONS) continue
+
+            val file = JSObject()
+            file.put("name", name)
+            file.put("uri", entry.uri.toString())
+            file.put("path", entryPath)
+            file.put("size", entry.length())
+            results.put(file)
+        }
+    }
+}
