@@ -102,7 +102,7 @@ Open the link on your Android phone, tap to download, then open the file and all
 76:4D:06:30:1A:99:9B:76:49:CF:C6:D6:B6:DC:D1:56:87:C1:16:25:89:55:9B:A5:C3:7B:8C:9C:35:F8:27:FF
 ```
 
-Check an APK against it with `apksigner verify --print-certs Vach.apk` (from the Android SDK build-tools); the `Signer #1 certificate SHA-256 digest` line must match. Each release's notes also list the SHA-256 of the APK file itself.
+Check an APK against it with `apksigner verify --print-certs Vach.apk` (from the Android SDK build-tools); the `certificate SHA-256 digest` line must match (depending on your build-tools version it reads `Signer #1 certificate SHA-256 digest` or `V2 Signer: certificate SHA-256 digest`). Each release's notes also list the SHA-256 of the APK file itself.
 
 > **For developers:** builds from the GitHub Actions workflow on every branch push are debug builds with package `com.vach.reader.debug`, labelled **Vach Debug**. They install side by side with the release build and support `chrome://inspect`. Debug builds made before that change used the release package name `com.vach.reader`; uninstall such a build before installing a release, since Android won't replace an app signed with a different key. How releases are cut is in [docs/RELEASING.md](docs/RELEASING.md).
 
