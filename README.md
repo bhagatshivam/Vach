@@ -99,7 +99,7 @@ Open the link on your Android phone, tap to download, then open the file and all
 **Verify the download (optional):** every release is signed with the same key. Its certificate SHA-256 is:
 
 ```
-Not published yet - set when the first release is signed.
+76:4D:06:30:1A:99:9B:76:49:CF:C6:D6:B6:DC:D1:56:87:C1:16:25:89:55:9B:A5:C3:7B:8C:9C:35:F8:27:FF
 ```
 
 Check an APK against it with `apksigner verify --print-certs Vach.apk` (from the Android SDK build-tools); the `Signer #1 certificate SHA-256 digest` line must match. Each release's notes also list the SHA-256 of the APK file itself.
