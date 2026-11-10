@@ -5,4 +5,4 @@
 # Replace UNSET below with the "SHA256:" line printed by:
 #   keytool -list -v -keystore vach-release.jks -alias vach
 # The "SHA256:" prefix, colons, spaces and letter case don't matter.
-UNSET
+SHA256: 76:4D:06:30:1A:99:9B:76:49:CF:C6:D6:B6:DC:D1:56:87:C1:16:25:89:55:9B:A5:C3:7B:8C:9C:35:F8:27:FF
