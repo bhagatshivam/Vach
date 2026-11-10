@@ -316,12 +316,23 @@ jobs:
             exit 1
           fi
           echo "$out"
-          if [ "$(grep -cE '^Signer #[0-9]+ certificate SHA-256 digest:' <<<"$out")" -ne 1 ]; then
-            echo "::error::Expected exactly one signer"
+          # apksigner's output format depends on the build-tools version:
+          #   older: "Signer #1 certificate SHA-256 digest: <hex>"
+          #   newer: "V2 Signer: certificate SHA-256 digest: <hex>" (one line per
+          #          signature scheme that verified, e.g. V2 and V3)
+          # Accept both. Require apksigner to report exactly one signer and every
+          # line to name the same certificate.
+          digest_re='^(V[0-9.]+ )?Signer( #[0-9]+|:) certificate SHA-256 digest: ([0-9a-f]+)$'
+          dn_re='^(V[0-9.]+ )?Signer( #[0-9]+|:) certificate DN: (.*)$'
+          signer_count=$(sed -nE 's/^Number of signers: ([0-9]+)$/\1/p' <<<"$out")
+          digests=$(sed -nE "s/$digest_re/\3/p" <<<"$out" | sort -u)
+          digest_count=$(grep -c . <<<"$digests" || true)
+          if [ "$signer_count" != "1" ] || [ "$digest_count" -ne 1 ]; then
+            echo "::error::Expected exactly one signer (apksigner reported '${signer_count:-none}' signer(s) and $digest_count distinct certificate digest(s))"
             exit 1
           fi
-          actual=$(sed -nE 's/^Signer #1 certificate SHA-256 digest: ([0-9a-f]+)$/\1/p' <<<"$out")
-          dn=$(sed -nE 's/^Signer #1 certificate DN: (.*)$/\1/p' <<<"$out")
+          actual="$digests"
+          dn=$(sed -nE "s/$dn_re/\3/p" <<<"$out" | sort -u)
           pretty=$(sed 's/../&:/g; s/:$//' <<<"$actual" | tr 'a-f' 'A-F')
           echo "Signer certificate DN:      $dn"
           echo "Signer certificate SHA-256: $pretty"
