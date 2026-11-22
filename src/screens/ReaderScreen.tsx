@@ -1,9 +1,13 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import { App as CapacitorApp } from '@capacitor/app';
 import type { LibraryFile } from '../lib/libraryFolder';
 import { FileTooLargeError, createFileSource } from '../lib/fileBridge';
 import type { EpubBook } from '../lib/epub';
 import { ChapterList } from '../components/ChapterList';
+import ImageLightbox, { DomNode } from '../components/ImageLightbox';
+import { TableAdaptContext } from '../components/tableAdaptContext';
+import { TableAdaptController, cloneForGrid, watchWidth } from '../lib/tableAdapter';
+import { anchorScrollTarget, needsScroll, preserveAnchorDuring, settingsAffectLayout } from '../lib/reanchor';
 import {
   prependCompensation,
   restoreWindowStart,
@@ -22,7 +26,7 @@ import {
   resolveAnchorToDocumentY,
   type Anchor,
 } from '../lib/readerAnchor';
-import { loadPosition, markOpened, savePosition, type StoredPosition } from '../lib/readingPosition';
+import { anchorForRestore, loadPosition, markOpened, savePosition, type StoredPosition } from '../lib/readingPosition';
 import {
   DEFAULT_READER_SETTINGS,
   FONT_FAMILY_OPTIONS,
@@ -41,6 +45,12 @@ import {
 interface ReaderScreenProps {
   file: LibraryFile;
   onBack: () => void;
+  /**
+   * The app's single hardware-back handler calls whatever is in here first.
+   * The reader puts "close the expanded table" in it while one is open, so
+   * Back closes the overlay instead of leaving the book.
+   */
+  overlayCloseRef?: RefObject<(() => void) | null>;
 }
 
 // epub.ts and pdf.ts intentionally produce this identical shape - a title
@@ -73,6 +83,11 @@ const INITIAL_CHAPTER_BATCH = 4;
 // scroll event - cheap enough per the anchor's binary search, but no
 // reason to write on every frame of a fling.
 const SAVE_DEBOUNCE_MS = 500;
+
+// The position is also remembered (not saved) this soon after scrolling stops,
+// so a rotation or resize - which only announces itself after the layout has
+// already moved - can restore to where the reader was just before it.
+const ANCHOR_CACHE_MS = 150;
 
 // Chapters that stream in behind the visible ones are committed to React
 // state in batches at most this often, not one setState (and one full
@@ -132,7 +147,7 @@ function getChapterElements(container: HTMLElement | null): HTMLElement[] {
   return Array.from(container.querySelectorAll(':scope > .chapter'));
 }
 
-export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
+export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderScreenProps) {
   const [settings, setSettings] = useState<ReaderSettings>(DEFAULT_READER_SETTINGS);
   const [book, setBook] = useState<ParsedBook | null>(null);
   const [totalChapters, setTotalChapters] = useState<number | null>(null);
@@ -165,6 +180,18 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
   // --- Windowed chapters (EPUB opened at a saved position) ---
   // Latest book state for callbacks that must not close over a stale one.
   const bookRef = useRef<ParsedBook | null>(null);
+  const revealedRef = useRef(false);
+  const settingsRef = useRef<ReaderSettings>(DEFAULT_READER_SETTINGS);
+  // --- Re-anchoring after a layout change ---
+  // The anchor captured BEFORE a font/line-height/theme change, to put the
+  // reader back on the same passage once the new layout has settled. Null
+  // when no such change is pending.
+  const reflowAnchorRef = useRef<Anchor | null>(null);
+  const reflowTokenRef = useRef(0);
+  // --- Tables ---
+  const [tableController, setTableController] = useState<TableAdaptController | null>(null);
+  const preserveViewRef = useRef<(work: () => void) => void>((work) => work());
+  const [expandedTable, setExpandedTable] = useState<HTMLTableElement | null>(null);
   // Kept alive for loading earlier chapters on demand; null for a PDF.
   const epubRef = useRef<EpubBook | null>(null);
   const loadingPreviousRef = useRef(false);
@@ -233,7 +260,9 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
         }
         if (savedPosition) {
           console.log('[ReaderScreen] load: restoring saved position', savedPosition.anchor);
-          setRestoreTarget(savedPosition);
+          // An anchor from a layout this build doesn't understand restores to
+          // the start of its chapter instead of a wrong paragraph.
+          setRestoreTarget({ ...savedPosition, anchor: anchorForRestore(savedPosition) });
         } else {
           setContentRevealed(true);
         }
@@ -457,6 +486,8 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
   // --- Loading earlier chapters (EPUB opened at a saved position) ---
   useLayoutEffect(() => {
     bookRef.current = book;
+    revealedRef.current = contentRevealed;
+    settingsRef.current = settings;
   });
 
   const loadPrevious = useCallback(async () => {
@@ -537,28 +568,154 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
     setContentRevealed(true);
   }
 
+  // Reads the current reading position from the live DOM, in book terms
+  // (chapter index in the book, never DOM order - the DOM may hold only a
+  // window of the book), plus the overall progress derived from it.
+  const measureAnchor = useCallback((): { anchor: Anchor; progressFraction: number } | null => {
+    const chapters = getChapterElements(contentRef.current);
+    const domAnchor = computeAnchor(chapters, 0);
+    if (!domAnchor) return null;
+
+    const firstChapterIndex = bookRef.current?.firstChapterIndex ?? 0;
+    const anchor = toAbsoluteAnchor(domAnchor, firstChapterIndex);
+    const chapterEl = chapters[domAnchor.chapterIndex];
+    const blockCount = chapterEl ? flattenToLeafBlocks(chapterEl).length : 0;
+    const progressFraction = computeProgressFraction(anchor, blockCount, totalChapters ?? firstChapterIndex + chapters.length);
+    return { anchor, progressFraction };
+  }, [totalChapters]);
+
   // Computes the current reading anchor from the live DOM and saves it.
   // Shared by the debounced scroll-save and every "guaranteed flush" point
   // that can still safely measure the DOM (back-to-library, app
   // backgrounding) - unmount uses the cached anchor instead (see the load
   // effect's cleanup), since its DOM may already be gone.
   const flushFresh = useCallback(() => {
+    const measured = measureAnchor();
+    if (!measured) return;
+    anchorRef.current = measured.anchor;
+    progressFractionRef.current = measured.progressFraction;
+    savePosition(file, measured.anchor, measured.progressFraction).catch((err) => console.error('[ReaderScreen] savePosition failed', err));
+  }, [file, measureAnchor]);
+
+  // Remembers where the reader is without saving it. A rotation or a resize
+  // only tells us AFTER the layout has already moved, so the position from
+  // just before it has to be on hand already.
+  const cacheAnchor = useCallback(() => {
+    const measured = measureAnchor();
+    if (!measured) return;
+    anchorRef.current = measured.anchor;
+    progressFractionRef.current = measured.progressFraction;
+  }, [measureAnchor]);
+
+  // Scrolls so that `anchor` (book-relative) is back at the top of the screen.
+  const restoreAnchor = useCallback((anchor: Anchor) => {
     const chapters = getChapterElements(contentRef.current);
-    const domAnchor = computeAnchor(chapters, 0);
-    if (!domAnchor) return;
+    const y = anchorScrollTarget(chapters, anchor, bookRef.current?.firstChapterIndex ?? 0, window.scrollY);
+    if (y !== null && needsScroll(window.scrollY, y)) window.scrollTo({ top: y, left: 0, behavior: 'instant' });
+  }, []);
 
-    // Saved in book terms (chapter index in the book), never DOM order - the
-    // DOM may hold only a window of the book.
-    const firstChapterIndex = bookRef.current?.firstChapterIndex ?? 0;
-    const anchor = toAbsoluteAnchor(domAnchor, firstChapterIndex);
-    const chapterEl = chapters[domAnchor.chapterIndex];
-    const blockCount = chapterEl ? flattenToLeafBlocks(chapterEl).length : 0;
-    const progressFraction = computeProgressFraction(anchor, blockCount, totalChapters ?? firstChapterIndex + chapters.length);
+  // Lets table adaptation change heights (a wide table becoming cards, say)
+  // above the reading position without moving the text on screen: note the
+  // anchor, do the writes, scroll back to it. Not before the first reveal,
+  // when the position is still being restored.
+  preserveViewRef.current = (work) => {
+    if (!revealedRef.current) work();
+    else preserveAnchorDuring(() => getChapterElements(contentRef.current), work);
+  };
 
-    anchorRef.current = anchor;
-    progressFractionRef.current = progressFraction;
-    savePosition(file, anchor, progressFraction).catch((err) => console.error('[ReaderScreen] savePosition failed', err));
-  }, [file, totalChapters]);
+  // Waits for the fonts the new layout uses, so it is measured with the real
+  // glyph metrics and not a fallback's.
+  async function settleFonts(forSettings: ReaderSettings) {
+    if (!('fonts' in document)) return;
+    await withTimeout(document.fonts.ready, FONT_WAIT_TIMEOUT_MS);
+    try {
+      await withTimeout(document.fonts.load(`${forSettings.fontSize}px ${FONT_FAMILY_STACKS[forSettings.fontFamily]}`), FONT_WAIT_TIMEOUT_MS);
+    } catch {
+      // Best effort.
+    }
+  }
+
+  const nextFrames = (count: number) =>
+    new Promise<void>((resolve) => {
+      const step = (left: number) => (left <= 0 ? resolve() : requestAnimationFrame(() => step(left - 1)));
+      step(count);
+    });
+
+  // After a layout change: wait for fonts, re-adapt the tables for the new
+  // measure (without their own view-keeping - we restore explicitly), scroll
+  // back to the passage that was captured BEFORE the change, then once more
+  // after two frames, for whatever settled late.
+  const reflowAndRestore = useCallback(
+    async (anchor: Anchor | null, forSettings: ReaderSettings) => {
+      const token = ++reflowTokenRef.current;
+      await settleFonts(forSettings);
+      await tableController?.reevaluate({ preserveView: false });
+      if (token !== reflowTokenRef.current) return;
+      if (anchor) restoreAnchor(anchor);
+      await nextFrames(2);
+      if (token !== reflowTokenRef.current) return;
+      if (anchor) restoreAnchor(anchor);
+      if (reflowAnchorRef.current === anchor) reflowAnchorRef.current = null;
+      cacheAnchor();
+    },
+    // settleFonts/nextFrames are stable in behavior; restoreAnchor and cacheAnchor carry the real dependencies.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tableController, restoreAnchor, cacheAnchor],
+  );
+
+  // --- Tables: one controller for the screen's lifetime ---
+  useEffect(() => {
+    const controller = new TableAdaptController({
+      preserveView: (work) => preserveViewRef.current(work),
+      onExpand: (table) => setExpandedTable(cloneForGrid(table)),
+    });
+    setTableController(controller);
+    return () => {
+      controller.destroy();
+      setTableController(null);
+    };
+  }, []);
+
+  // A layout-affecting setting changed (the anchor was captured in
+  // updateSettings, before it applied): wait for the new layout, then put the
+  // reader back on the same passage.
+  useEffect(() => {
+    const anchor = reflowAnchorRef.current;
+    if (!anchor) return;
+    void reflowAndRestore(anchor, settings);
+    // Only layout-affecting settings are listed on purpose.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.fontSize, settings.lineHeight, settings.fontFamily, settings.theme]);
+
+  // Rotation, split-screen, a foldable opening: the reader column's width
+  // changed. Re-adapt the tables for the new width and restore the position
+  // from just before it (the cached anchor).
+  const hasBook = book !== null;
+  useEffect(() => {
+    const element = contentRef.current;
+    if (!contentRevealed || !element) return;
+    return watchWidth(element, () => {
+      void reflowAndRestore(anchorRef.current, settingsRef.current);
+    });
+  }, [contentRevealed, hasBook, reflowAndRestore]);
+
+  // The position at the moment the content is revealed is the baseline the
+  // first rotation will restore to.
+  useEffect(() => {
+    if (!contentRevealed) return;
+    const frame = requestAnimationFrame(cacheAnchor);
+    return () => cancelAnimationFrame(frame);
+  }, [contentRevealed, cacheAnchor]);
+
+  // Hardware Back closes the expanded table first.
+  const closeExpandedTable = useCallback(() => setExpandedTable(null), []);
+  useEffect(() => {
+    if (!expandedTable || !overlayCloseRef) return;
+    overlayCloseRef.current = closeExpandedTable;
+    return () => {
+      if (overlayCloseRef.current === closeExpandedTable) overlayCloseRef.current = null;
+    };
+  }, [expandedTable, overlayCloseRef, closeExpandedTable]);
 
   // Debounced save while actively reading. Deliberately a separate,
   // independent effect from the nav auto-hide timer below - it must never
@@ -571,17 +728,21 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
     if (!contentRevealed || !book) return;
 
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    let cacheTimer: ReturnType<typeof setTimeout> | null = null;
     function handleScroll() {
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(flushFresh, SAVE_DEBOUNCE_MS);
+      if (cacheTimer) clearTimeout(cacheTimer);
+      cacheTimer = setTimeout(cacheAnchor, ANCHOR_CACHE_MS);
     }
 
     window.addEventListener('scroll', handleScroll, { passive: true });
     return () => {
       window.removeEventListener('scroll', handleScroll);
       if (debounceTimer) clearTimeout(debounceTimer);
+      if (cacheTimer) clearTimeout(cacheTimer);
     };
-  }, [contentRevealed, book, flushFresh]);
+  }, [contentRevealed, book, flushFresh, cacheAnchor]);
 
   // App backgrounding - same gating reasoning as the scroll listener above:
   // only meaningful once there's an actual reading position to flush.
@@ -646,6 +807,12 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
   }
 
   function updateSettings(patch: Partial<ReaderSettings>) {
+    // About to change something that can move text: note where the reader is
+    // NOW, while the DOM still has the old layout. (Kept if one is already
+    // pending, so a quick run of taps restores to where the first one began.)
+    if (settingsAffectLayout(settingsRef.current, { ...settingsRef.current, ...patch }) && reflowAnchorRef.current === null && revealedRef.current) {
+      reflowAnchorRef.current = measureAnchor()?.anchor ?? null;
+    }
     setSettings((prev) => {
       const next = { ...prev, ...patch };
       saveReaderSettings(next);
@@ -810,9 +977,21 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
           style={contentStyle}
           onClick={handleContentTap}
         >
-          <ChapterList firstChapterIndex={book.firstChapterIndex} chaptersHtml={book.chaptersHtml} />
+          <TableAdaptContext.Provider value={tableController}>
+            <ChapterList firstChapterIndex={book.firstChapterIndex} chaptersHtml={book.chaptersHtml} />
+          </TableAdaptContext.Provider>
           {!book.isComplete && <p className="loading-more">Loading more…</p>}
         </div>
+      )}
+
+      {expandedTable && (
+        <ImageLightbox
+          label="Table"
+          onClose={closeExpandedTable}
+          contentStyle={{ ...contentStyle, background: themeColors.background, color: themeColors.text }}
+        >
+          <DomNode node={expandedTable} />
+        </ImageLightbox>
       )}
     </div>
   );
