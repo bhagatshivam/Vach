@@ -56,16 +56,21 @@ vi.mock('./lib/libraryFolder', () => ({
   readChunkBase64: vi.fn(async () => ({ base64: 'dGVzdA==', length: 4 })),
 }));
 
-// ReaderScreen dynamically imports epub.ts/pdf.ts - mocked here (not real
+// ReaderScreen dynamically imports epubFile.ts/pdf.ts - mocked here (not real
 // parsing) purely so opening a book resolves quickly and deterministically,
 // with no saved position so content reveals immediately and the
 // appStateChange listener registers right away.
-vi.mock('./lib/epub', () => ({
-  streamEpub: async function* () {
-    yield { type: 'title', title: 'Test Book' };
-    yield { type: 'total', count: 1 };
-    yield { type: 'chapter', html: '<p>one paragraph</p>' };
-  },
+vi.mock('./lib/epubFile', () => ({
+  openEpubFile: async () => ({
+    title: 'Test Book',
+    chapterCount: 1,
+    loadChapter: async () => '<p>one paragraph</p>',
+    stream: async function* () {
+      yield { type: 'title', title: 'Test Book' };
+      yield { type: 'total', count: 1 };
+      yield { type: 'chapter', html: '<p>one paragraph</p>' };
+    },
+  }),
 }));
 
 afterEach(() => {
