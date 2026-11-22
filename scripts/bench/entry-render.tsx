@@ -1,3 +1,4 @@
+/* oxlint-disable react/only-export-components -- a script entry, not a hot-reloaded module */
 // Render counts and commit cost while chapters are appended, for the chapter
 // list before Phase 1b (modeled) and after it (the real ChapterList).
 //

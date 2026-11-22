@@ -63,6 +63,7 @@ report({
   targetMs: round(tTarget),
   allMs: round(tAll),
   readCalls: stats.readCalls,
+  sizeCalls: stats.sizeCalls,
   bytesTransferredMiB: round(stats.bytesTransferred / 1048576),
   ...mem,
   keepAlive: bytes.length > 0 && generator !== null, // keep the book referenced until after the retained-memory reading

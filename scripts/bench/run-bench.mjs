@@ -3,6 +3,7 @@
 //
 //   node scripts/bench/run-bench.mjs [--fixtures <dir>] [--reps 3] [--only restore,small,threshold,scale,render]
 //                                    [--before-ref origin/main] [--out <results.json>] [--big]
+//                                    [--threshold-fixtures a,b,c]
 //
 // "before" = the code at --before-ref (default origin/main, i.e. without Phase
 // 1b), built from a temporary git worktree. "after" = this working tree.
@@ -159,7 +160,7 @@ function benchRestore(name, fixture, indexes, latency) {
     results[`restore-${name}`][index] = m;
     const b = m.before;
     const a = m.after;
-    rows.push([`chapter ${index}`, fmt(b.openMs, ' ms'), fmt(a.openMs, ' ms'), fmt(b.targetMs, ' ms'), fmt(a.targetMs, ' ms'), ratio(b.targetMs, a.targetMs), `${b.chaptersParsed} / ${a.chaptersParsed}`, `${fmt(b.peakRssDeltaMiB)} / ${fmt(a.peakRssDeltaMiB)}`, `${fmt(b.sampledPeakHeapDeltaMiB)} / ${fmt(a.sampledPeakHeapDeltaMiB)}`, `${fmt(b.retainedHeapDeltaMiB + b.retainedBuffersDeltaMiB)} / ${fmt(a.retainedHeapDeltaMiB + a.retainedBuffersDeltaMiB)}`]);
+    rows.push([`chapter ${index}`, fmt(b.openMs, ' ms'), fmt(a.openMs, ' ms'), fmt(b.targetMs, ' ms'), fmt(a.targetMs, ' ms'), ratio(b.targetMs, a.targetMs), `${b.chaptersParsed} / ${a.chaptersParsed}`, `${fmt(b.peakRssDeltaMiB)} / ${fmt(a.peakRssDeltaMiB)}`, `${fmt(b.sampledPeakHeapDeltaMiB)} / ${fmt(a.sampledPeakHeapDeltaMiB)}`, `${fmt(r1(b.retainedHeapDeltaMiB + b.retainedBuffersDeltaMiB))} / ${fmt(r1(a.retainedHeapDeltaMiB + a.retainedBuffersDeltaMiB))}`]);
   }
   section(
     `Restore, ${name.toUpperCase()} (${(fixture.bytes / 1048576).toFixed(1)} MiB, ${fixture.chapters} chapters, ${latency} ms per bridge call; median of ${reps})`,
@@ -191,6 +192,7 @@ if (only.has('small')) {
     rows.push([`${latency} ms`, 'open', fmt(m1.before.openMs, ' ms'), fmt(m1.after.openMs, ' ms'), ratio(m1.before.openMs, m1.after.openMs)]);
     rows.push([`${latency} ms`, 'first 4 chapters', fmt(m1.before.first4Ms, ' ms'), fmt(m1.after.first4Ms, ' ms'), ratio(m1.before.first4Ms, m1.after.first4Ms)]);
     rows.push([`${latency} ms`, 'all 50 chapters', fmt(m2.before.allMs, ' ms'), fmt(m2.after.allMs, ' ms'), ratio(m2.before.allMs, m2.after.allMs)]);
+    rows.push([`${latency} ms`, 'bridge calls (size + reads)', `${m2.before.sizeCalls} + ${m2.before.readCalls}`, `${m2.after.sizeCalls} + ${m2.after.readCalls}`, '']);
   }
   section(`Small-book regression, C (${(fixtures.c.bytes / 1048576).toFixed(2)} MiB, 50 chapters; median of ${Math.max(reps, 7)})`, table(['Bridge latency', 'Milestone', 'Before', 'After', 'Before / after'], rows));
 }
@@ -202,10 +204,12 @@ if (only.has('small')) {
 if (only.has('threshold')) {
   results.threshold = {};
   const rows = [];
+  const wanted = new Set(flag('threshold-fixtures', 'a,b').split(','));
   const study = [
     ['a', fixtures.a, 500],
     ['b', fixtures.b, 150],
-  ];
+    ['c', fixtures.c, 25],
+  ].filter(([name]) => wanted.has(name));
   for (const [name, fixture, mid] of study) {
     for (const latency of [0, 1, 3, 10]) {
       log(`threshold ${name}, ${latency} ms/call`);
@@ -260,7 +264,7 @@ if (only.has('scale') && fixtures.d100) {
       const m = measure(variants, 2);
       results.scale[`${label}-${index}`] = m;
       for (const [flow, v] of Object.entries(m)) {
-        rows.push([label, `chapter ${index}`, flow, fmt(v.openMs, ' ms'), fmt(v.targetMs, ' ms'), String(v.readCalls), fmt(v.bytesTransferredMiB), fmt(v.peakRssDeltaMiB), fmt(v.retainedHeapDeltaMiB + v.retainedBuffersDeltaMiB)]);
+        rows.push([label, `chapter ${index}`, flow, fmt(v.openMs, ' ms'), fmt(v.targetMs, ' ms'), String(v.readCalls), fmt(v.bytesTransferredMiB), fmt(v.peakRssDeltaMiB), fmt(r1(v.retainedHeapDeltaMiB + v.retainedBuffersDeltaMiB))]);
       }
     }
   }

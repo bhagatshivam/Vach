@@ -79,6 +79,7 @@ report({
   targetMs: round(tTarget),
   allMs: round(tAll),
   readCalls: stats.readCalls,
+  sizeCalls: stats.sizeCalls,
   bytesTransferredMiB: round(stats.bytesTransferred / 1048576),
   ...mem,
   keepAlive: book.chapterCount > 0,
