@@ -256,12 +256,12 @@ describe('readAll', () => {
     const bridge = fakeBridge(makeFile(4), { getSize: async () => MAX_BOOK_BYTES + 1 });
     const error = await readAll('u', { transport: bridge }).catch((e) => e);
     expect(error).toBeInstanceOf(FileTooLargeError);
-    expect(error.message).toMatch(/1,024 MB limit/);
+    expect(error.message).toBe('This file is 151 MB, which is over the 150 MB limit Vach can safely open.');
     expect(bridge.calls).toHaveLength(0);
   });
 
   it('accepts a file of exactly MAX_BOOK_BYTES as far as the size check goes', async () => {
-    // Don't allocate 1 GiB in a unit test: abort right after the size check passes.
+    // Don't allocate 150 MiB in a unit test: abort right after the size check passes.
     const controller = new AbortController();
     controller.abort(new Error('stop'));
     const bridge = fakeBridge(makeFile(4), { getSize: async () => MAX_BOOK_BYTES });

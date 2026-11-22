@@ -24,37 +24,38 @@ export const DEFAULT_CHUNK_BYTES = 1 * MIB;
 export const NATIVE_MAX_CHUNK_BYTES = 4 * MIB;
 
 /**
- * Sanity ceiling on the size of a book Vach will try to open: 1 GiB.
+ * Sanity ceiling on the size of a book Vach will try to open: 150 MiB.
  *
- * This replaces the old hard 150 MB wall, which existed only because the
- * whole file was Base64'd across the bridge. It is not a hard technical
- * limit any more, it is a guard against opening something so large that the
- * WebView's renderer process would be killed by the OS (a crash that takes
- * the app, and the reader's position, with it) instead of failing cleanly:
+ * Not a hard technical limit of the chunked bridge (which can read any
+ * size); a guard so an oversized file fails with a clear message instead of
+ * getting the WebView's renderer process killed by the OS, which would take
+ * the app and the reader's position with it:
  *   - Memory for an opened book is about 1x its size (a Uint8Array for an
  *     EPUB; pdf.js's full-length chunk buffer in its worker for a PDF),
- *     plus working memory, on phones that commonly have 4-6 GB total RAM
- *     shared with every other app.
- *   - 1 GiB is ~2.5x the largest book anyone has described (a 400 MB PDF),
- *     and safely under the ~2 GiB ArrayBuffer ceiling of a 32-bit WebView
- *     renderer, so every offset and length stays a safe integer.
+ *     plus working memory, on phones that commonly have 4-6 GB of RAM shared
+ *     with every other app.
+ *   - 150 MiB is ~1.5x the largest books in the owner's library (about
+ *     100 MB), so every real book opens with headroom, while keeping the
+ *     worst-case footprint modest on low-memory phones.
  * Raise it only with measurements from a real phone.
  */
-export const MAX_BOOK_BYTES = 1024 * MIB;
+export const MAX_BOOK_BYTES = 150 * MIB;
 
 export class FileTooLargeError extends Error {
   readonly size: number;
   constructor(size: number) {
     super(
-      `This file is ${formatMiB(size)}, which is over the ${formatMiB(MAX_BOOK_BYTES)} limit Vach can safely open.`,
+      `This file is ${formatMiB(size, Math.ceil)}, which is over the ${formatMiB(MAX_BOOK_BYTES)} limit Vach can safely open.`,
     );
     this.name = 'FileTooLargeError';
     this.size = size;
   }
 }
 
-function formatMiB(bytes: number): string {
-  return `${Math.round(bytes / MIB).toLocaleString('en-US')} MB`;
+// `round` is Math.ceil for the file's own size so a file just over the limit
+// reads "151 MB", not the same number as the limit it exceeds.
+function formatMiB(bytes: number, round: (n: number) => number = Math.round): string {
+  return `${round(bytes / MIB).toLocaleString('en-US')} MB`;
 }
 
 /** The two native calls this module needs; injectable so tests need no Capacitor runtime. */
