@@ -7,8 +7,23 @@ const INDEX_KEY = 'reading_progress_index';
 
 export const FINISHED_THRESHOLD = 0.98;
 
+/**
+ * Version of what a saved anchor's blockIndex counts. Unversioned positions
+ * (everything saved before Phase 4) are version 1. Version 2 is the current
+ * structure: tables and <pre> are plain leaf blocks and reader chrome
+ * (data-vach-ui) is skipped. Versions 1 and 2 count identically - the old
+ * <div class="scroll-x"> wrapper was itself the leaf where the table/pre is
+ * now, one block each (pinned by readerAnchor.test.ts) - so a version-1
+ * anchor is restored as-is. A version this build doesn't know (written by a
+ * newer build, then opened here after a downgrade) is not trusted: see
+ * anchorForRestore.
+ */
+export const ANCHOR_VERSION = 2;
+
 export interface StoredPosition {
   anchor: Anchor;
+  /** See ANCHOR_VERSION. 1 for a position saved before the field existed. */
+  anchorVersion: number;
   name: string;
   size: number;
   savedAt: number;
@@ -20,6 +35,17 @@ export interface ProgressEntry {
 }
 
 export type ProgressIndex = Record<string, ProgressEntry>;
+
+/**
+ * The anchor to actually restore to. Versions up to the current one are
+ * restored exactly as saved (version 1 is provably equivalent - see
+ * ANCHOR_VERSION). A newer version is not understood, so it falls back to the
+ * start of the saved chapter: the right chapter, never a wrong paragraph.
+ */
+export function anchorForRestore(stored: Pick<StoredPosition, 'anchor' | 'anchorVersion'>): Anchor {
+  if (stored.anchorVersion <= ANCHOR_VERSION) return stored.anchor;
+  return { chapterIndex: stored.anchor.chapterIndex, blockIndex: 0, blockFraction: 0 };
+}
 
 export function isFinished(progressFraction: number): boolean {
   return progressFraction >= FINISHED_THRESHOLD;
@@ -77,7 +103,14 @@ function validateStoredPosition(raw: unknown): StoredPosition | null {
   if (typeof v.size !== 'number' || !Number.isFinite(v.size)) return null;
   if (typeof v.savedAt !== 'number' || !Number.isFinite(v.savedAt)) return null;
 
+  // Missing = saved before versioning (1). Present but not a positive integer
+  // = not something this build wrote: treat it as unknown (newer), not as 1.
+  const rawVersion = (raw as { anchorVersion?: unknown }).anchorVersion;
+  const anchorVersion =
+    rawVersion === undefined ? 1 : typeof rawVersion === 'number' && Number.isInteger(rawVersion) && rawVersion >= 1 ? rawVersion : ANCHOR_VERSION + 1;
+
   return {
+    anchorVersion,
     anchor: {
       chapterIndex: v.anchor.chapterIndex,
       blockIndex: v.anchor.blockIndex,
@@ -200,7 +233,7 @@ export async function savePosition(
   progressFraction: number,
 ): Promise<void> {
   const key = bookKey(file);
-  const stored: StoredPosition = { anchor, name: file.name, size: file.size, savedAt: Date.now() };
+  const stored: StoredPosition = { anchor, anchorVersion: ANCHOR_VERSION, name: file.name, size: file.size, savedAt: Date.now() };
 
   const index = await loadIndexInternal();
   const existing = index[key];

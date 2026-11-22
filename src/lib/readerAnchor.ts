@@ -20,23 +20,32 @@ export interface Rect {
 
 export type RectOf = (el: Element) => Rect;
 
-// Real leaf content a chapter/page can be made of. <pre> and <table> aren't
-// listed separately: both are wrapped in a <div class="scroll-x"> after
-// sanitization (see epub.ts), so a bare, unwrapped <pre>/<table> never
-// actually appears as a direct leaf in practice - the wrapper is the one
-// atomic leaf for either case. <table> stays here anyway as a defensive
-// fallback, not a case this is expected to actually hit.
+// Real leaf content a chapter/page can be made of. <table> and <pre> are leaf
+// tags like any other: a table is ONE block however the reader chooses to
+// show it (as a table, as cards, or collapsed behind an "Expand Grid"
+// placeholder), because the table element itself stays in place and only
+// classes change. (They used to be wrapped in a <div class="scroll-x"> that
+// was the leaf instead; a table or <pre> is a leaf either way and neither is
+// ever descended into, so blockIndex counts are identical with or without
+// that wrapper - see readerAnchor.test.ts, which pins the equivalence.)
 const LEAF_TAGS = new Set(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'pre', 'blockquote', 'figure', 'img', 'table']);
 
+/**
+ * Reader chrome inserted next to book content (a table's "Expand Grid"
+ * button, say) carries this attribute. It is not part of the book, so it is
+ * never a block: a saved blockIndex must mean the same thing whether or not
+ * the reader has added chrome around the content.
+ */
+export const READER_UI_ATTRIBUTE = 'data-vach-ui';
+
 function isLeafBlock(el: Element): boolean {
-  if (el.classList.contains('scroll-x')) return true;
   return LEAF_TAGS.has(el.tagName.toLowerCase());
 }
 
 /**
  * Walks a chapter's DOM, flattening through generic wrapper containers
- * (div/span/section/ul/ol - anything not itself a recognized leaf tag or
- * the .scroll-x wrapper) to find the real leaf blocks inside them. A whole
+ * (div/span/section/ul/ol - anything not itself a recognized leaf tag) to
+ * find the real leaf blocks inside them. A whole
  * chapter wrapped in one outer <div> still yields its individual
  * paragraphs, not one giant block - the wrapper contributes nothing to the
  * block list itself, only its children do.
@@ -50,6 +59,7 @@ export function flattenToLeafBlocks(root: Element): Element[] {
 
   function walk(el: Element): void {
     for (const child of Array.from(el.children)) {
+      if (child.hasAttribute(READER_UI_ATTRIBUTE)) continue;
       if (isLeafBlock(child)) {
         result.push(child);
         continue;

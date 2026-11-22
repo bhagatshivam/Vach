@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  ANCHOR_VERSION,
   __resetForTests,
+  anchorForRestore,
   bookKey,
   ensureIndexLoaded,
   getProgressIndexSync,
@@ -194,5 +196,48 @@ describe('positions saved by earlier releases', () => {
     await savePosition(file, { chapterIndex: 3, blockIndex: 4, blockFraction: 0.5 }, 0.1);
     const raw = JSON.parse(localStorage.getItem(`CapacitorStorage.reading_position:${bookKey(file)}`)!);
     expect(Object.keys(raw.anchor).sort()).toEqual(['blockFraction', 'blockIndex', 'chapterIndex']);
+  });
+});
+
+describe('anchor versioning', () => {
+  const file = { name: 'long-novel.epub', size: 7_654_321 };
+  const keyFor = () => `CapacitorStorage.reading_position:${bookKey(file)}`;
+  const anchor = { chapterIndex: 742, blockIndex: 18, blockFraction: 0.375 };
+
+  it('a position saved before versioning loads as version 1 and is restored exactly as saved', async () => {
+    localStorage.setItem(keyFor(), JSON.stringify({ anchor, name: file.name, size: file.size, savedAt: 1700000000000 }));
+    const loaded = await loadPosition(file);
+    expect(loaded?.anchorVersion).toBe(1);
+    expect(anchorForRestore(loaded!)).toEqual(anchor);
+  });
+
+  it('new saves carry the current version', async () => {
+    await savePosition(file, anchor, 0.5);
+    const raw = JSON.parse(localStorage.getItem(keyFor())!);
+    expect(raw.anchorVersion).toBe(ANCHOR_VERSION);
+    expect(ANCHOR_VERSION).toBe(2);
+    expect(anchorForRestore((await loadPosition(file))!)).toEqual(anchor);
+  });
+
+  it('a position written by a newer layout (unknown version) falls back to the start of the saved chapter', async () => {
+    localStorage.setItem(keyFor(), JSON.stringify({ anchor, anchorVersion: ANCHOR_VERSION + 1, name: file.name, size: file.size, savedAt: 1 }));
+    const loaded = await loadPosition(file);
+    expect(anchorForRestore(loaded!)).toEqual({ chapterIndex: 742, blockIndex: 0, blockFraction: 0 });
+  });
+
+  it.each([['a string', 'two'], ['a fraction', 1.5], ['zero', 0], ['negative', -1], ['null', null]])(
+    'a malformed version (%s) is not trusted as version 1: chapter start',
+    async (_label, bad) => {
+      localStorage.setItem(keyFor(), JSON.stringify({ anchor, anchorVersion: bad, name: file.name, size: file.size, savedAt: 1 }));
+      const loaded = await loadPosition(file);
+      expect(anchorForRestore(loaded!)).toEqual({ chapterIndex: 742, blockIndex: 0, blockFraction: 0 });
+    },
+  );
+
+  it('the version does not touch the rest of the stored anchor', async () => {
+    await savePosition(file, anchor, 0.1);
+    const loaded = await loadPosition(file);
+    expect(loaded?.anchor).toEqual(anchor);
+    expect(loaded?.name).toBe(file.name);
   });
 });

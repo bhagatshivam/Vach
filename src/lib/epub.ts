@@ -351,7 +351,17 @@ function sanitizeStyleAttr(style: string): string {
 // survived unresolved, http(s):, javascript:, data:text/html) is dropped.
 // ALLOWED_URI_REGEXP enforces the same rule at the DOMPurify-config level as
 // a second, independent check.
+// Publishers hard-code table geometry (<table width="800">, <td width="120">,
+// <col width=...>). Left in, it fights the reader's own table layout - a
+// fixed width wider than the screen is exactly what makes a table overflow -
+// so it is dropped at the source. (<img width/height> is not touched here.)
+const TABLE_GEOMETRY_NODES = new Set(['TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TD', 'TH', 'COL', 'COLGROUP', 'CAPTION']);
+
 DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
+  if ((data.attrName === 'width' || data.attrName === 'height') && TABLE_GEOMETRY_NODES.has(node.nodeName)) {
+    data.keepAttr = false;
+    return;
+  }
   if (data.attrName === 'style') {
     data.attrValue = sanitizeStyleAttr(data.attrValue);
     if (!data.attrValue) data.keepAttr = false;
@@ -452,31 +462,6 @@ async function resolveImgSrcs(
 }
 
 /**
- * Wraps every <table> and <pre> in DOMPurify's own sanitized output in a
- * <div class="scroll-x"> of our own creation, so a wide one (a many-column
- * table, a long unbreakable table cell, an ASCII-art status block) scrolls
- * inside its own bounded box instead of forcing the whole chapter - and with
- * it, the whole page - to scroll sideways (see .scroll-x in App.css).
- *
- * This runs on DOMPurify's already-sanitized fragment, using only elements
- * this function creates itself, so it can't reintroduce anything the
- * allowlist above was designed to keep out - no new tag or attribute is
- * added to ALLOWED_TAGS/ALLOWED_ATTR for this.
- */
-function wrapWideElements(fragment: DocumentFragment): string {
-  for (const el of Array.from(fragment.querySelectorAll('table, pre'))) {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'scroll-x';
-    el.replaceWith(wrapper);
-    wrapper.appendChild(el);
-  }
-
-  const container = document.createElement('div');
-  container.appendChild(fragment);
-  return container.innerHTML;
-}
-
-/**
  * Parses a chapter's raw markup, resolves its images to data: URIs, and
  * runs the result through DOMPurify's default-deny allowlist (see
  * DOMPURIFY_CONFIG above) rather than trying to enumerate everything
@@ -504,26 +489,22 @@ async function sanitizeChapterHtml(
  * page text, built entirely via escapeHtml()) but is routed through this
  * anyway as defense in depth, per the same "default-deny, not a place to
  * special-case one caller as exempt" reasoning as the rest of this file.
- * Shared with pdf.ts rather than duplicated, so there's one allowlist, one
- * style-sanitizer, one wrapWideElements - not two copies to keep in sync.
+ * Shared with pdf.ts rather than duplicated, so there's one allowlist and
+ * one style-sanitizer, not two copies to keep in sync.
+ *
+ * Wide tables and <pre> blocks are no longer wrapped in a scrolling box here:
+ * tables are adapted to the screen after mount (tableAdapter.ts) and <pre>
+ * wraps in CSS, so nothing needs a sideways-scrolling container.
  */
 export function sanitizePlainFragment(rawHtml: string): string {
-  const fragment = DOMPurify.sanitize(rawHtml, {
-    ...DOMPURIFY_CONFIG,
-    RETURN_DOM_FRAGMENT: true,
-  });
-  return wrapWideElements(fragment);
+  return DOMPurify.sanitize(rawHtml, DOMPURIFY_CONFIG);
 }
 
 /**
- * Same allowlist and sanitize() call as sanitizePlainFragment, but for
- * content that provably never contains a <table> or <pre> - pdf.ts's
- * reconstructed page text only ever emits <h2>/<p>, built entirely through
- * escapeHtml() (see reconstructPage in pdf.ts), so wrapWideElements's own
- * table/pre scan can never find anything to wrap there. Skipping it, along
- * with the RETURN_DOM_FRAGMENT + manual re-serialization round trip it
- * exists to support, means DOMPurify's own (faster) direct string-return
- * mode runs instead - same output for this content, less work to get it.
+ * Same allowlist and sanitize() call as sanitizePlainFragment, for content
+ * that only ever contains <h2>/<p> built through escapeHtml() (pdf.ts's
+ * reconstructed page text, see reconstructPage). Kept as its own name so
+ * that caller states what it relies on.
  */
 export function sanitizePlainTextOnly(rawHtml: string): string {
   return DOMPurify.sanitize(rawHtml, DOMPURIFY_CONFIG);
