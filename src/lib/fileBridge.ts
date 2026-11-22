@@ -70,6 +70,12 @@ export const defaultTransport: ChunkTransport = {
 };
 
 export interface ReadOptions {
+  /**
+   * The file's size, if the caller has already asked for it (createFileSource
+   * does). readAll then skips its own size lookup - one fewer native round
+   * trip on every book open.
+   */
+  knownSize?: number;
   transport?: ChunkTransport;
   /** Bytes requested per bridge call (clamped to 1..NATIVE_MAX_CHUNK_BYTES). */
   chunkBytes?: number;
@@ -207,7 +213,8 @@ async function fillFrom(
  */
 export async function readAll(uri: string, options: ReadOptions = {}): Promise<Uint8Array> {
   const transport = options.transport ?? defaultTransport;
-  const size = await getSize(uri, transport);
+  const size = options.knownSize ?? (await getSize(uri, transport));
+  assertSafeNonNegativeInteger(size, 'File size');
   if (size > MAX_BOOK_BYTES) throw new FileTooLargeError(size);
   if (size === 0) throw new Error('This file is empty');
 

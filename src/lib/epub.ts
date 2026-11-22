@@ -530,38 +530,76 @@ export function sanitizePlainTextOnly(rawHtml: string): string {
 }
 
 /**
- * Streams an EPUB's title and chapters as they become available, instead of
- * fully parsing the book before returning anything. This lets ReaderScreen
- * show the first chapters as soon as they're ready and keep loading the
- * rest in the background - important for large books, where fully parsing
- * every chapter (and, previously, every image) up front could take minutes.
+ * What the EPUB reader needs from a ZIP: existence checks and capped entry
+ * reads. Two implementations exist - JSZip over an in-memory archive (small
+ * EPUBs) and zipReader.ts over byte ranges (large ones) - and everything
+ * below is written against this, so a book behaves identically either way.
  */
-export async function* streamEpub(bytes: Uint8Array, fallbackTitle: string): AsyncGenerator<ParseEvent> {
-  const zip = await JSZip.loadAsync(bytes);
+export interface EpubArchive {
+  has(path: string): boolean;
+  /** Reads one entry's decompressed bytes; rejects if missing or over `maxBytes` of real output. */
+  read(path: string, maxBytes: number): Promise<Uint8Array>;
+}
 
-  const containerEntry = zip.file('META-INF/container.xml');
-  if (!containerEntry) {
+export function archiveFromJSZip(zip: JSZip): EpubArchive {
+  return {
+    has: (path) => zip.file(path) !== null,
+    read: (path, maxBytes) => {
+      const entry = zip.file(path);
+      if (!entry) return Promise.reject(new Error(`Entry "${path}" not found in the archive`));
+      return readEntryBytesCapped(entry, maxBytes);
+    },
+  };
+}
+
+/**
+ * An opened EPUB with random access to its chapters. Opening reads only the
+ * container, OPF and spine - no chapter is decompressed or sanitized until
+ * loadChapter() asks for it, which is what lets the reader start at a saved
+ * chapter without parsing the ones before it.
+ */
+export interface EpubBook {
+  title: string;
+  /**
+   * Number of chapters, in reading order. A chapter's index here is the
+   * `chapterIndex` stored in a saved reading position. Spine entries that
+   * don't exist in the archive are dropped, matching what the reader has
+   * always done, so indexes line up with previously saved positions.
+   */
+  chapterCount: number;
+  /** Sanitized HTML for chapter `index`. Never rejects for a bad chapter: that yields an error placeholder, as before. */
+  loadChapter(index: number): Promise<string>;
+  /** Title and total, then chapters `startIndex`..end in order. */
+  stream(startIndex?: number): AsyncGenerator<ParseEvent>;
+}
+
+/**
+ * Opens an EPUB from an archive: reads the container, OPF and spine, and
+ * returns a book whose chapters are loaded on demand (see EpubBook).
+ */
+export async function openEpub(archive: EpubArchive, fallbackTitle: string): Promise<EpubBook> {
+  if (!archive.has('META-INF/container.xml')) {
     throw new Error('Not a valid EPUB: missing META-INF/container.xml');
   }
-  const opfPath = findOpfPath(await containerEntry.async('string'));
+  const decoder = new TextDecoder();
+  const opfPath = findOpfPath(decoder.decode(await archive.read('META-INF/container.xml', MAX_CHAPTER_UNCOMPRESSED_BYTES)));
 
-  const opfEntry = zip.file(opfPath);
-  if (!opfEntry) {
+  if (!archive.has(opfPath)) {
     throw new Error(`Not a valid EPUB: OPF file not found at ${opfPath}`);
   }
-  const opfXml = await opfEntry.async('string');
+  const opfXml = decoder.decode(await archive.read(opfPath, MAX_CHAPTER_UNCOMPRESSED_BYTES));
   const opfDir = dirOf(opfPath);
 
   const { manifest, spineHrefs } = parseOpf(opfXml, opfDir);
   const title = extractTitle(opfXml) || fallbackTitle;
-  yield { type: 'title', title };
-  // Known from the spine alone, before any chapter is actually parsed - lets
-  // a progress fraction and a "chapter N of M" restore indicator exist
-  // immediately, not just once streaming finishes. A spine entry that fails
-  // to resolve to a real zip file (skipped below, not yielded as a chapter)
-  // means the true yielded-chapter count can end up slightly under this -
-  // intentional: this is the book's own declared total, not a live count.
-  yield { type: 'total', count: spineHrefs.length };
+
+  // Known up front, from the spine and the archive's own index: a progress
+  // fraction and "chapter N of M" exist immediately, and chapter indexes
+  // stay valid without parsing anything.
+  const chapterHrefs = spineHrefs.filter((href) => archive.has(href));
+  if (chapterHrefs.length === 0) {
+    throw new Error('No readable chapters found in this EPUB');
+  }
 
   const manifestByHref = new Map<string, ManifestItem>();
   for (const item of manifest.values()) {
@@ -575,14 +613,13 @@ export async function* streamEpub(bytes: Uint8Array, fallbackTitle: string): Asy
   async function resolveImage(resolvedHref: string): Promise<string | null> {
     if (imageCache.has(resolvedHref)) return imageCache.get(resolvedHref) ?? null;
     const item = manifestByHref.get(resolvedHref);
-    const entry = item?.mediaType.startsWith('image/') ? zip.file(resolvedHref) : null;
-    if (!entry) {
+    if (!item?.mediaType.startsWith('image/') || !archive.has(resolvedHref)) {
       imageCache.set(resolvedHref, null);
       return null;
     }
     try {
-      const bytes = await readEntryBytesCapped(entry, MAX_IMAGE_UNCOMPRESSED_BYTES);
-      const dataUri = `data:${item!.mediaType};base64,${bytesToBase64(bytes)}`;
+      const bytes = await archive.read(resolvedHref, MAX_IMAGE_UNCOMPRESSED_BYTES);
+      const dataUri = `data:${item.mediaType};base64,${bytesToBase64(bytes)}`;
       imageCache.set(resolvedHref, dataUri);
       return dataUri;
     } catch (err) {
@@ -594,25 +631,40 @@ export async function* streamEpub(bytes: Uint8Array, fallbackTitle: string): Asy
     }
   }
 
-  let emitted = 0;
-  for (const href of spineHrefs) {
-    const entry = zip.file(href);
-    if (!entry) continue;
-
-    let html: string;
+  async function loadChapter(index: number): Promise<string> {
+    const href = chapterHrefs[index];
+    if (href === undefined) throw new RangeError(`No chapter ${index} (this book has ${chapterHrefs.length})`);
     try {
-      const bytes = await readEntryBytesCapped(entry, MAX_CHAPTER_UNCOMPRESSED_BYTES);
-      const rawHtml = new TextDecoder().decode(bytes);
-      html = await sanitizeChapterHtml(rawHtml, dirOf(href), resolveImage);
+      const bytes = await archive.read(href, MAX_CHAPTER_UNCOMPRESSED_BYTES);
+      return await sanitizeChapterHtml(decoder.decode(bytes), dirOf(href), resolveImage);
     } catch (err) {
       console.error('[epub] failed to parse chapter', href, err);
-      html = '<p class="chapter-error">[This chapter could not be loaded]</p>';
+      return '<p class="chapter-error">[This chapter could not be loaded]</p>';
     }
-    emitted++;
-    yield { type: 'chapter', html };
   }
 
-  if (emitted === 0) {
-    throw new Error('No readable chapters found in this EPUB');
-  }
+  return {
+    title,
+    chapterCount: chapterHrefs.length,
+    loadChapter,
+    async *stream(startIndex = 0) {
+      yield { type: 'title', title };
+      yield { type: 'total', count: chapterHrefs.length };
+      for (let i = Math.max(0, startIndex); i < chapterHrefs.length; i++) {
+        yield { type: 'chapter', html: await loadChapter(i) };
+      }
+    },
+  };
+}
+
+/**
+ * Streams an EPUB's title and chapters as they become available, instead of
+ * fully parsing the book before returning anything - from an in-memory
+ * archive. (The reader opens books through epubFile.ts and EpubBook.stream();
+ * this whole-archive form is kept for callers that already hold the bytes.)
+ */
+export async function* streamEpub(bytes: Uint8Array, fallbackTitle: string): AsyncGenerator<ParseEvent> {
+  const zip = await JSZip.loadAsync(bytes);
+  const book = await openEpub(archiveFromJSZip(zip), fallbackTitle);
+  yield* book.stream(0);
 }

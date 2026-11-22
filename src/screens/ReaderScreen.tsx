@@ -1,13 +1,23 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { App as CapacitorApp } from '@capacitor/app';
 import type { LibraryFile } from '../lib/libraryFolder';
-import { FileTooLargeError, createFileSource, readAll } from '../lib/fileBridge';
+import { FileTooLargeError, createFileSource } from '../lib/fileBridge';
+import type { EpubBook } from '../lib/epub';
+import { ChapterList } from '../components/ChapterList';
+import {
+  prependCompensation,
+  restoreWindowStart,
+  shouldLoadPrevious,
+  toAbsoluteAnchor,
+  toDomAnchor,
+} from '../lib/chapterWindow';
 import type { PageKind, ParseEvent, PdfHandle } from '../lib/pdf';
 import { PdfPageLoader } from '../lib/pdfPageLoader';
 import { pushKind, shouldShowScannedNotice } from '../lib/scannedNotice';
 import {
   computeAnchor,
   computeProgressFraction,
+  findBlockAtY,
   flattenToLeafBlocks,
   resolveAnchorToDocumentY,
   type Anchor,
@@ -38,8 +48,14 @@ interface ReaderScreenProps {
 // everything below (rendering, fonts, themes, auto-hide nav) is written
 // once and works for both formats without a fork. isComplete is false
 // while chapters are still streaming in behind the ones already shown.
+//
+// chaptersHtml is a window of the book, not necessarily all of it from the
+// start: chaptersHtml[k] is chapter firstChapterIndex + k. It begins at 0
+// unless an EPUB was opened at a saved position, in which case earlier
+// chapters are loaded (prepended) lazily as the reader scrolls up.
 interface ParsedBook {
   title: string;
+  firstChapterIndex: number;
   chaptersHtml: string[];
   isComplete: boolean;
 }
@@ -57,6 +73,11 @@ const INITIAL_CHAPTER_BATCH = 4;
 // scroll event - cheap enough per the anchor's binary search, but no
 // reason to write on every frame of a fling.
 const SAVE_DEBOUNCE_MS = 500;
+
+// Chapters that stream in behind the visible ones are committed to React
+// state in batches at most this often, not one setState (and one full
+// re-render of the list) per chapter.
+const APPEND_FLUSH_MS = 100;
 
 // document.fonts.ready should resolve almost immediately for this app (every
 // font is bundled via @fontsource, nothing is fetched over the network), but
@@ -76,20 +97,28 @@ const FONT_WAIT_TIMEOUT_MS = 2000;
 // Bytes arrive through the chunked file bridge (fileBridge.ts): a PDF is read
 // range-by-range on demand by pdf.js; an EPUB is read once, chunk by chunk,
 // straight into one preallocated Uint8Array (no whole-file Base64 string).
-async function openBookStream(
-  uri: string,
-  fileName: string,
-  signal: AbortSignal,
-): Promise<{ generator: AsyncGenerator<ParseEvent>; pdfHandle: PdfHandle | null }> {
+//
+// An EPUB is opened lazily (epubFile.ts): only its index is read up front, and
+// stream(startIndex) parses chapters from there on - so a saved position deep
+// in a long book doesn't first parse everything before it. A PDF still
+// streams every page from the start (lazy PDF text is a later phase).
+interface OpenedBook {
+  pdfHandle: PdfHandle | null;
+  /** Random-access chapter loading for earlier chapters; null for a PDF. */
+  epub: EpubBook | null;
+  stream(startIndex: number): AsyncGenerator<ParseEvent>;
+}
+
+async function openBookStream(uri: string, fileName: string, signal: AbortSignal): Promise<OpenedBook> {
   if (fileName.toLowerCase().endsWith('.pdf')) {
     const source = await createFileSource(uri, { signal });
     const { openPdf } = await import('../lib/pdf');
     const handle = await openPdf(source, fileName);
-    return { generator: handle.streamChapters(), pdfHandle: handle };
+    return { pdfHandle: handle, epub: null, stream: () => handle.streamChapters() };
   }
-  const bytes = await readAll(uri, { signal });
-  const { streamEpub } = await import('../lib/epub');
-  return { generator: streamEpub(bytes, fileName), pdfHandle: null };
+  const { openEpubFile } = await import('../lib/epubFile');
+  const epub = await openEpubFile(uri, fileName, { signal });
+  return { pdfHandle: null, epub, stream: (startIndex) => epub.stream(startIndex) };
 }
 
 const NAV_IDLE_MS = 3000;
@@ -115,6 +144,10 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
 
   // --- Reading-position restore ---
   const [restoreTarget, setRestoreTarget] = useState<StoredPosition | null>(null);
+  // Set by "Start from beginning" when the book was opened partway in: the
+  // load effect runs again, ignoring the saved position, so chapter 0 is what
+  // gets mounted (rather than the chapters around the saved spot).
+  const [skipRestore, setSkipRestore] = useState(false);
   // True once it's safe to actually show reading content: immediately for a
   // book with no saved position, or once a saved position has been resolved
   // and scrolled to (or the user chose to skip that via "Start from
@@ -128,6 +161,17 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
   const contentRef = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<Anchor | null>(null);
   const progressFractionRef = useRef(0);
+
+  // --- Windowed chapters (EPUB opened at a saved position) ---
+  // Latest book state for callbacks that must not close over a stale one.
+  const bookRef = useRef<ParsedBook | null>(null);
+  // Kept alive for loading earlier chapters on demand; null for a PDF.
+  const epubRef = useRef<EpubBook | null>(null);
+  const loadingPreviousRef = useRef(false);
+  // The chapter element that was at the top of the viewport just before
+  // earlier chapters were inserted above it, and where it was - used to put
+  // it back exactly after the insert (see the layout effect below).
+  const prependAnchorRef = useRef<{ el: HTMLElement; top: number } | null>(null);
 
   // --- PDF-specific: on-demand page rasterization ---
   // null for an EPUB (or before the handle is ready); set once openBookStream
@@ -145,6 +189,7 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
   useEffect(() => {
     let cancelled = false;
     let generator: AsyncGenerator<ParseEvent> | null = null;
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
     // Stops in-flight chunked reads (and range requests, via the PDF handle)
     // when the user backs out mid-open, instead of reading on for nobody.
     const abortController = new AbortController();
@@ -156,6 +201,9 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
     restoreStartedRef.current = false;
     anchorRef.current = null;
     progressFractionRef.current = 0;
+    epubRef.current = null;
+    loadingPreviousRef.current = false;
+    prependAnchorRef.current = null;
     pageKindWindowRef.current = [];
     scannedNoticeDismissedRef.current = false;
     setRestoreTarget(null);
@@ -171,10 +219,12 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
         console.log('[ReaderScreen] load: reading file', file.uri);
         markOpened(file).catch((err) => console.error('[ReaderScreen] markOpened failed', err));
         const [savedPosition, opened] = await Promise.all([
-          loadPosition(file).catch((err) => {
-            console.error('[ReaderScreen] loadPosition failed', err);
-            return null;
-          }),
+          skipRestore
+            ? Promise.resolve(null)
+            : loadPosition(file).catch((err) => {
+                console.error('[ReaderScreen] loadPosition failed', err);
+                return null;
+              }),
           openBookStream(file.uri, file.name, abortController.signal),
         ]);
         if (cancelled) {
@@ -192,10 +242,32 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
         setStatus('Parsing...');
 
         pdfHandleRef.current = opened.pdfHandle;
-        generator = opened.generator;
+        epubRef.current = opened.epub;
+        // An EPUB opened at a saved position starts at that chapter (plus
+        // the one before it), not at chapter 0. Saved anchors are chapter-
+        // relative, so they are valid as-is - nothing before the saved
+        // chapter has to be parsed to resolve one.
+        const startIndex = opened.epub && savedPosition ? restoreWindowStart(savedPosition.anchor.chapterIndex, opened.epub.chapterCount) : 0;
+        generator = opened.stream(startIndex);
         let title = file.name;
         const initialChapters: string[] = [];
         let revealed = false;
+
+        const pendingChapters: string[] = [];
+        const flushPending = () => {
+          flushTimer = null;
+          if (cancelled || pendingChapters.length === 0) return;
+          const batch = pendingChapters.splice(0);
+          setBook((prev) =>
+            prev
+              ? { ...prev, chaptersHtml: prev.chaptersHtml.concat(batch) }
+              : { title, firstChapterIndex: startIndex, chaptersHtml: batch, isComplete: false },
+          );
+        };
+        const queueChapter = (html: string) => {
+          pendingChapters.push(html);
+          if (flushTimer === null) flushTimer = setTimeout(flushPending, APPEND_FLUSH_MS);
+        };
 
         for await (const event of generator) {
           if (cancelled) return;
@@ -215,13 +287,11 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
             if (shouldShowScannedNotice(pageKindWindowRef.current)) setScannedNoticeVisible(true);
           }
           if (savedPosition) {
-            // Restoring: every chapter is appended as it arrives, not
-            // batched - the content stays hidden behind the overlay until
-            // the target chapter shows up regardless, so there's no reason
-            // to delay revealing state here the way the normal path does.
-            setBook((prev) =>
-              prev ? { ...prev, chaptersHtml: [...prev.chaptersHtml, event.html] } : { title, chaptersHtml: [event.html], isComplete: false },
-            );
+            // Restoring: every chapter is appended as it arrives - the
+            // content stays hidden behind the overlay until the target
+            // chapter shows up regardless, so there's no reason to hold
+            // chapters back the way the normal path does.
+            queueChapter(event.html);
             continue;
           }
           if (!revealed) {
@@ -229,25 +299,29 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
             if (initialChapters.length >= INITIAL_CHAPTER_BATCH) {
               revealed = true;
               console.log('[ReaderScreen] load: revealing first', initialChapters.length, 'chapter(s)');
-              setBook({ title, chaptersHtml: [...initialChapters], isComplete: false });
+              setBook({ title, firstChapterIndex: 0, chaptersHtml: [...initialChapters], isComplete: false });
               setStatus('');
             }
             continue;
           }
-          setBook((prev) => (prev ? { ...prev, chaptersHtml: [...prev.chaptersHtml, event.html] } : prev));
+          queueChapter(event.html);
         }
 
         if (cancelled) return;
         console.log('[ReaderScreen] load: streaming complete');
+        // Commit anything still waiting for the next batch before marking
+        // the stream complete, so completion can never overtake a chapter.
+        if (flushTimer !== null) clearTimeout(flushTimer);
+        flushPending();
         if (savedPosition) {
-          setBook((prev) => (prev ? { ...prev, isComplete: true } : { title, chaptersHtml: [], isComplete: true }));
+          setBook((prev) => (prev ? { ...prev, isComplete: true } : { title, firstChapterIndex: startIndex, chaptersHtml: [], isComplete: true }));
           setStatus('');
         } else if (revealed) {
           setBook((prev) => (prev ? { ...prev, isComplete: true } : prev));
         } else {
           // Fewer chapters than INITIAL_CHAPTER_BATCH in the whole book -
           // nothing was revealed yet, so show what we have as already complete.
-          setBook({ title, chaptersHtml: initialChapters, isComplete: true });
+          setBook({ title, firstChapterIndex: 0, chaptersHtml: initialChapters, isComplete: true });
           setStatus('');
         }
       } catch (err) {
@@ -263,6 +337,8 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
     load();
     return () => {
       cancelled = true;
+      if (flushTimer !== null) clearTimeout(flushTimer);
+      epubRef.current = null;
       abortController.abort();
       // Signals the generator to stop at its next suspension point instead
       // of continuing to parse chapters nobody will ever see, e.g. when the
@@ -287,7 +363,7 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [file]);
+  }, [file, skipRestore]);
 
   // --- PDF-specific: lazy windowed rendering of page-image placeholders ---
   // Runs once content is actually visible (contentRevealed - restoring is
@@ -318,7 +394,11 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
   useEffect(() => {
     if (!restoreTarget || contentRevealed || restoreStartedRef.current || error) return;
     const targetChapterIndex = restoreTarget.anchor.chapterIndex;
-    const parsedSoFar = book?.chaptersHtml.length ?? 0;
+    const firstChapterIndex = book?.firstChapterIndex ?? 0;
+    // Chapters 0..parsedSoFar-1 of the book are loaded or (when opened at a
+    // saved position) deliberately skipped - what matters is whether the
+    // target chapter has arrived, in book terms, not DOM terms.
+    const parsedSoFar = firstChapterIndex + (book?.chaptersHtml.length ?? 0);
     const streamDone = book?.isComplete ?? false;
     // Either the target chapter has actually arrived, or the stream
     // finished without ever reaching it (a stale/corrupted chapterIndex
@@ -350,8 +430,10 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
       }
       if (restoreAbortedRef.current) return;
 
+      // The saved anchor is book-relative; the DOM holds a window of the
+      // book, so translate (and clamp) it to the mounted chapters first.
       const chapters = getChapterElements(contentRef.current);
-      const firstY = resolveAnchorToDocumentY(chapters, anchor, window.scrollY);
+      const firstY = resolveAnchorToDocumentY(chapters, toDomAnchor(anchor, firstChapterIndex, chapters.length), window.scrollY);
       if (firstY !== null) window.scrollTo({ top: firstY, left: 0, behavior: 'instant' });
 
       // Re-verify once after layout has had a chance to settle further -
@@ -364,7 +446,7 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       if (restoreAbortedRef.current) return;
       const chapters2 = getChapterElements(contentRef.current);
-      const secondY = resolveAnchorToDocumentY(chapters2, anchor, window.scrollY);
+      const secondY = resolveAnchorToDocumentY(chapters2, toDomAnchor(anchor, firstChapterIndex, chapters2.length), window.scrollY);
       if (secondY !== null && Math.abs(secondY - window.scrollY) > 2) {
         window.scrollTo({ top: secondY, left: 0, behavior: 'instant' });
       }
@@ -372,7 +454,85 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [book, restoreTarget, contentRevealed, error]);
 
+  // --- Loading earlier chapters (EPUB opened at a saved position) ---
+  useLayoutEffect(() => {
+    bookRef.current = book;
+  });
+
+  const loadPrevious = useCallback(async () => {
+    const epub = epubRef.current;
+    const current = bookRef.current;
+    if (!epub || !current || current.firstChapterIndex === 0 || loadingPreviousRef.current) return;
+
+    loadingPreviousRef.current = true;
+    const target = current.firstChapterIndex - 1;
+    try {
+      const html = await epub.loadChapter(target);
+      // Gone (unmounted, or restarted from the beginning) or already
+      // changed while that chapter was loading: drop the result.
+      if (epubRef.current !== epub || bookRef.current?.firstChapterIndex !== target + 1) return;
+
+      // Remember which chapter is at the top of the viewport and exactly
+      // where, so the layout effect below can put it back once the new
+      // chapter has pushed it down. The chapters mounted keep their keys
+      // (their book index), so their DOM nodes survive the insert.
+      const chapters = getChapterElements(contentRef.current);
+      if (chapters.length > 0) {
+        const { index } = findBlockAtY(chapters, 0, (el) => {
+          const rect = el.getBoundingClientRect();
+          return { top: rect.top, bottom: rect.bottom };
+        });
+        const el = chapters[index];
+        prependAnchorRef.current = { el, top: el.getBoundingClientRect().top };
+      }
+      setBook((prev) =>
+        prev && prev.firstChapterIndex === target + 1
+          ? { ...prev, firstChapterIndex: target, chaptersHtml: [html, ...prev.chaptersHtml] }
+          : prev,
+      );
+    } catch (err) {
+      console.error('[ReaderScreen] loading an earlier chapter failed', err);
+    } finally {
+      loadingPreviousRef.current = false;
+    }
+  }, []);
+
+  // After earlier chapters were inserted above the reading position, scroll
+  // by however far the chapter that was on screen moved - measured on the
+  // element itself, so it's right whether or not the browser's own scroll
+  // anchoring already compensated (then the measured shift is ~0).
+  useLayoutEffect(() => {
+    const pending = prependAnchorRef.current;
+    if (!pending) return;
+    prependAnchorRef.current = null;
+    if (!pending.el.isConnected) return;
+    const shift = prependCompensation(pending.top, pending.el.getBoundingClientRect().top);
+    if (Math.abs(shift) > 0.5) window.scrollBy({ top: shift, left: 0, behavior: 'instant' });
+  }, [book?.firstChapterIndex]);
+
+  // Keeps a couple of screens of earlier chapters loaded above the reader.
+  // Re-checks after every prepend (via the dependency), so a run of short
+  // chapters is filled in without waiting for another scroll event.
+  useEffect(() => {
+    if (!contentRevealed || !epubRef.current) return;
+    function check() {
+      if (shouldLoadPrevious(window.scrollY, window.innerHeight, bookRef.current?.firstChapterIndex ?? 0)) {
+        void loadPrevious();
+      }
+    }
+    window.addEventListener('scroll', check, { passive: true });
+    check();
+    return () => window.removeEventListener('scroll', check);
+  }, [contentRevealed, book?.firstChapterIndex, loadPrevious]);
+
   function handleStartFromBeginning() {
+    // Opened partway into an EPUB: chapter 0 isn't mounted, so reopen from
+    // the start, ignoring the saved position. (A PDF, or an EPUB that was
+    // already mounted from chapter 0, only needs the overlay dismissed.)
+    if (book && book.firstChapterIndex > 0) {
+      setSkipRestore(true);
+      return;
+    }
     restoreAbortedRef.current = true;
     setContentRevealed(true);
   }
@@ -384,12 +544,16 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
   // effect's cleanup), since its DOM may already be gone.
   const flushFresh = useCallback(() => {
     const chapters = getChapterElements(contentRef.current);
-    const anchor = computeAnchor(chapters, 0);
-    if (!anchor) return;
+    const domAnchor = computeAnchor(chapters, 0);
+    if (!domAnchor) return;
 
-    const chapterEl = chapters[anchor.chapterIndex];
+    // Saved in book terms (chapter index in the book), never DOM order - the
+    // DOM may hold only a window of the book.
+    const firstChapterIndex = bookRef.current?.firstChapterIndex ?? 0;
+    const anchor = toAbsoluteAnchor(domAnchor, firstChapterIndex);
+    const chapterEl = chapters[domAnchor.chapterIndex];
     const blockCount = chapterEl ? flattenToLeafBlocks(chapterEl).length : 0;
-    const progressFraction = computeProgressFraction(anchor, blockCount, totalChapters ?? chapters.length);
+    const progressFraction = computeProgressFraction(anchor, blockCount, totalChapters ?? firstChapterIndex + chapters.length);
 
     anchorRef.current = anchor;
     progressFractionRef.current = progressFraction;
@@ -502,7 +666,7 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
 
   const showRestoreOverlay = Boolean(restoreTarget) && !contentRevealed && !error;
   const restoreTargetChapterNumber = restoreTarget ? restoreTarget.anchor.chapterIndex + 1 : 0;
-  const restoreParsedSoFar = Math.min(book?.chaptersHtml.length ?? 0, restoreTargetChapterNumber);
+  const restoreParsedSoFar = Math.min((book?.firstChapterIndex ?? 0) + (book?.chaptersHtml.length ?? 0), restoreTargetChapterNumber);
 
   return (
     <div className="reader" data-theme={settings.theme} style={{ background: themeColors.background, color: themeColors.text }}>
@@ -646,9 +810,7 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
           style={contentStyle}
           onClick={handleContentTap}
         >
-          {book.chaptersHtml.map((html, i) => (
-            <section key={i} className="chapter" dangerouslySetInnerHTML={{ __html: html }} />
-          ))}
+          <ChapterList firstChapterIndex={book.firstChapterIndex} chaptersHtml={book.chaptersHtml} />
           {!book.isComplete && <p className="loading-more">Loading more…</p>}
         </div>
       )}

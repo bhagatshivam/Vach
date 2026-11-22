@@ -274,6 +274,24 @@ describe('readAll', () => {
     await expect(readAll('u', { transport: bridge, chunkBytes: CHUNK })).rejects.toThrow(/changed while it was being read \(expected 30 bytes, got 20\)/);
   });
 
+  it('uses a size the caller already has instead of asking the native side again', async () => {
+    const file = makeFile(20);
+    let sizeCalls = 0;
+    const bridge = fakeBridge(file, {
+      getSize: async () => {
+        sizeCalls++;
+        return file.length;
+      },
+    });
+    const out = await readAll('u', { transport: bridge, chunkBytes: CHUNK, knownSize: 20 });
+    expect(Array.from(out)).toEqual(Array.from(file));
+    expect(sizeCalls).toBe(0);
+    // ...and still enforces the same checks on it.
+    await expect(readAll('u', { transport: bridge, knownSize: MAX_BOOK_BYTES + 1 })).rejects.toBeInstanceOf(FileTooLargeError);
+    await expect(readAll('u', { transport: bridge, knownSize: 0 })).rejects.toThrow('This file is empty');
+    await expect(readAll('u', { transport: bridge, knownSize: -3 })).rejects.toThrow(RangeError);
+  });
+
   it('rejects a nonsensical size from the native side', async () => {
     for (const size of [-1, 1.5, Number.NaN]) {
       await expect(getSize('u', fakeBridge(makeFile(1), { getSize: async () => size }))).rejects.toThrow(RangeError);

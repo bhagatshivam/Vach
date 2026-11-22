@@ -317,3 +317,19 @@ These amendments come from the Step 0 audit (`docs/step0-audit.md`, branch `upgr
 7. Phase 1c: lazy per-page PDF text + cache, if measurements justify
 8. M2b (Phase 3B)
 9. Search (Phase 5b)
+
+### Phase 1b result (amendment A2)
+
+**What changed**
+- **Lazy opening.** An EPUB is opened as an `EpubBook` (`epub.ts`): only the container, OPF and spine are read up front; a chapter is decompressed and sanitized only when `loadChapter(i)` is called. The reader opens at the saved chapter (minus one chapter of context) without parsing chapters before it, and loads earlier chapters as the reader scrolls up, putting the view back exactly where it was after each insert (measured on the chapter element, so it is correct with or without the browser's own scroll anchoring).
+- **Central-directory ZIP reader** (`zipReader.ts`): reads the end-of-central-directory record from the tail, indexes the central directory, and reads and inflates single entries on demand (stored and deflate; ZIP64, multi-part, encryption and other methods fail with a clear message). Inflate uses the platform `DecompressionStream('deflate-raw')`: no new dependency and no bundle bytes, offline, off the main thread, and the app's own build target (Vite's default, Chrome 111) already exceeds the Chrome 103 it needs. Small reads are served from a block cache (1 MiB blocks, 8 kept) because chapters are small and stored in order.
+- **Size threshold: 16 MiB** (`EPUB_WHOLE_FILE_MAX_BYTES`, `epubFile.ts`). Up to it, the file is read once with `readAll` and opened with JSZip, exactly as before; above it, the ranged reader is used. Both feed the same `openEpub`, so what the reader shows is identical either way (pinned by a parity test). 16 MiB is the suggested starting point, not a measured optimum.
+- **Chapter list.** Chapters are memoized components keyed by their book index; appending or prepending never re-renders or touches mounted chapters (render-count tests), and streamed-in chapters are committed in batches (at most every 100 ms) instead of one update each.
+- **Saved positions need no migration.** The stored anchor `{ chapterIndex, blockIndex, blockFraction }` was already chapter-relative (`blockIndex` counts blocks inside one chapter), so old positions are used as-is; a test pins the on-disk format. Positions are saved in book terms and progress / "chapter X of Y" use chapter indexes, never DOM order. The anchor *version* field from A4 is still due in Phase 4, when `.scroll-x` changes block structure.
+- Chapter indexes are positions in the spine after dropping entries missing from the archive (as before), so they still match positions saved earlier. `total` is now that count rather than the raw spine length.
+
+**Still not done**
+- Lazy per-page PDF text (**Phase 1c**): a PDF still extracts every page in order, and restoring at page N still extracts pages 1..N. Memory for a huge PDF is still about 1× the file.
+- No persistent cache (`bookCache`) and no parser worker; EPUB parsing and sanitizing still run on the main thread.
+- Chapters after the saved one are still streamed in and kept mounted (windowed unmounting stays gated behind measurements).
+- Not verified on a phone: speed of a late restore on a very long EPUB, scroll smoothness while earlier chapters load, and the 16 MiB threshold.

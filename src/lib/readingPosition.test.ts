@@ -172,3 +172,27 @@ describe('write serialization', () => {
   // back-button work. enqueueWrite's try/catch is simple enough to verify
   // by inspection instead of fighting that Proxy for marginal benefit.
 });
+
+describe('positions saved by earlier releases', () => {
+  // Phase 1b opens an EPUB at its saved chapter without parsing earlier ones.
+  // That is only safe because a saved anchor is chapter-relative: blockIndex
+  // counts leaf blocks inside the one chapter, never across the book. These
+  // pin that the on-disk format is unchanged, so existing users' positions
+  // load exactly as written (no migration, no version field needed).
+  it('loads a position written before this release, byte for byte', async () => {
+    const file = { name: 'long-novel.epub', size: 7_654_321 };
+    localStorage.setItem(
+      `CapacitorStorage.reading_position:${bookKey(file)}`,
+      '{"anchor":{"chapterIndex":742,"blockIndex":18,"blockFraction":0.375},"name":"long-novel.epub","size":7654321,"savedAt":1700000000000}',
+    );
+    const loaded = await loadPosition(file);
+    expect(loaded?.anchor).toEqual({ chapterIndex: 742, blockIndex: 18, blockFraction: 0.375 });
+  });
+
+  it('writes the same shape it reads: three chapter-relative fields and no extras', async () => {
+    const file = { name: 'x.epub', size: 5 };
+    await savePosition(file, { chapterIndex: 3, blockIndex: 4, blockFraction: 0.5 }, 0.1);
+    const raw = JSON.parse(localStorage.getItem(`CapacitorStorage.reading_position:${bookKey(file)}`)!);
+    expect(Object.keys(raw.anchor).sort()).toEqual(['blockFraction', 'blockIndex', 'chapterIndex']);
+  });
+});
