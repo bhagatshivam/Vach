@@ -5,6 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import android.util.Base64
 import android.util.Log
 import androidx.activity.result.ActivityResult
@@ -20,14 +23,17 @@ import com.getcapacitor.annotation.CapacitorPlugin
 private const val TAG = "LibraryFolderPlugin"
 private val SUPPORTED_EXTENSIONS = setOf("pdf", "epub")
 
-// 150MB: generous for a real EPUB/PDF (even image-heavy ones are usually
-// well under 100MB) but small enough to avoid OOM once this gets
-// base64-encoded for the bridge - the raw bytes, the base64 string (a JVM
-// String is UTF-16, so ~2x its own char count on top of the ~1.33x base64
-// already adds), and the serialized call payload are all in memory at
-// once, on a typical Android app heap (192-512MB without
-// android:largeHeap, which this app doesn't set).
-private const val MAX_READABLE_FILE_BYTES = 150L * 1024 * 1024
+// Upper bound on one readChunk() call, enforced natively so a buggy or
+// hostile caller can't ask for an arbitrarily large slice. 4 MiB because
+// each call transiently holds the raw slice (4 MiB), its Base64 string
+// (~5.3 MB) and the serialized bridge message (~5.6 MB, org.json escapes
+// every '/' in Base64 as "\/") at once - roughly 15 MB, comfortably inside
+// a 192 MB app heap even with a few calls in flight. Bigger slices don't buy
+// throughput (the cost is dominated by the per-call fd open + bridge hop,
+// which a 1 MiB slice already amortizes) but do raise GC pressure and the
+// worst-case OOM exposure. The JS side normally asks for 1 MiB; this is
+// only the hard ceiling.
+private const val MAX_CHUNK_BYTES = 4 * 1024 * 1024
 
 /**
  * Validates that [uri] is a content:// URI this app currently holds a
@@ -44,7 +50,7 @@ private const val MAX_READABLE_FILE_BYTES = 150L * 1024 * 1024
  * well-formed Uri they're given, including a file:// URI into this app's
  * own private storage (which never goes through the SAF permission-grant
  * system at all, since that system only governs content:// URIs) - without
- * this check, the only thing stopping readFile/statFile/scanFolder from
+ * this check, the only thing stopping readChunk/getSize/statFile/scanFolder from
  * reading anything the app process can read is that nothing is currently
  * asking them to.
  */
@@ -299,10 +305,28 @@ class LibraryFolderPlugin : Plugin() {
         }
     }
 
+    /**
+     * Reads a non-negative integer parameter. Capacitor's PluginCall.getLong
+     * only returns a value when org.json happened to parse the number as a
+     * Long; a JS number like 1048576 arrives as an Integer and getLong would
+     * silently return null, so the raw value is inspected instead. Doubles
+     * are accepted only if they are whole numbers (JS has one number type).
+     */
+    private fun readNonNegativeLong(call: PluginCall, name: String): Long? {
+        val raw = call.data.opt(name)
+        val value: Long = when (raw) {
+            is Int -> raw.toLong()
+            is Long -> raw
+            is Double -> if (raw == Math.floor(raw) && !raw.isInfinite() && raw < 9.007199254740992E15) raw.toLong() else return null
+            else -> return null
+        }
+        return if (value >= 0) value else null
+    }
+
     @PluginMethod
-    fun readFile(call: PluginCall) {
+    fun getSize(call: PluginCall) {
         val uriString = call.getString("uri")
-        Log.d(TAG, "readFile() uri=$uriString")
+        Log.d(TAG, "getSize() uri=$uriString")
         if (uriString == null) {
             call.reject("Missing 'uri' parameter")
             return
@@ -311,46 +335,102 @@ class LibraryFolderPlugin : Plugin() {
         val uri = Uri.parse(uriString)
         val validationError = validateGrantedUri(context, uri)
         if (validationError != null) {
-            Log.e(TAG, "readFile() rejected $uriString: $validationError")
+            Log.e(TAG, "getSize() rejected $uriString: $validationError")
             call.reject(validationError)
             return
         }
 
         try {
-            // Checked before opening a stream, not just after reading, so an
-            // oversized file is rejected without ever materializing its bytes.
-            // DocumentFile.length() can legitimately come back 0 if the
-            // provider doesn't report a size up front - the post-read check
-            // below is the backstop for that case, not a second check of the
-            // same thing.
-            val knownSize = DocumentFile.fromSingleUri(context, uri)?.length() ?: 0L
-            if (knownSize > MAX_READABLE_FILE_BYTES) {
-                Log.e(TAG, "readFile() file too large ($knownSize bytes): $uriString")
-                call.reject("File is too large to open (over ${MAX_READABLE_FILE_BYTES / (1024 * 1024)}MB)")
-                return
+            // statSize is the real size of the opened descriptor (-1 when the
+            // provider can't say); DocumentFile.length() is only a fallback,
+            // since it reports 0 for "unknown" as well as for an empty file.
+            var size = context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
+            if (size < 0) {
+                size = DocumentFile.fromSingleUri(context, uri)?.length() ?: 0L
+                if (size <= 0) {
+                    Log.e(TAG, "getSize() could not determine size for $uriString")
+                    call.reject("Could not determine the size of this file")
+                    return
+                }
             }
+            val ret = JSObject()
+            ret.put("size", size)
+            call.resolve(ret)
+        } catch (t: Throwable) {
+            Log.e(TAG, "getSize() failed for $uriString", t)
+            call.reject("Failed to read file size: ${t.message}")
+        }
+    }
 
-            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            if (bytes == null) {
-                Log.e(TAG, "readFile() openInputStream returned null for $uriString")
+    /**
+     * Returns one slice of a file, [offset, offset + length), as Base64. The
+     * slice is read with a positioned read (pread) on a descriptor opened for
+     * just this call - the file is never read from the start, so cost is
+     * proportional to the slice, not to the offset or the file size. Fewer
+     * bytes than requested come back only at end of file (a read at or past
+     * the end returns an empty slice).
+     */
+    @PluginMethod
+    fun readChunk(call: PluginCall) {
+        val uriString = call.getString("uri")
+        if (uriString == null) {
+            call.reject("Missing 'uri' parameter")
+            return
+        }
+
+        val offset = readNonNegativeLong(call, "offset")
+        if (offset == null) {
+            call.reject("Invalid 'offset': must be a non-negative integer")
+            return
+        }
+        val requested = readNonNegativeLong(call, "length")
+        if (requested == null || requested < 1 || requested > MAX_CHUNK_BYTES) {
+            call.reject("Invalid 'length': must be an integer from 1 to $MAX_CHUNK_BYTES")
+            return
+        }
+        val length = requested.toInt()
+
+        val uri = Uri.parse(uriString)
+        val validationError = validateGrantedUri(context, uri)
+        if (validationError != null) {
+            Log.e(TAG, "readChunk() rejected $uriString: $validationError")
+            call.reject(validationError)
+            return
+        }
+
+        try {
+            val pfd = context.contentResolver.openFileDescriptor(uri, "r")
+            if (pfd == null) {
+                Log.e(TAG, "readChunk() openFileDescriptor returned null for $uriString")
                 call.reject("Could not open file for reading")
                 return
             }
-            if (bytes.size > MAX_READABLE_FILE_BYTES) {
-                Log.e(TAG, "readFile() file too large after read (${bytes.size} bytes): $uriString")
-                call.reject("File is too large to open (over ${MAX_READABLE_FILE_BYTES / (1024 * 1024)}MB)")
-                return
+            val buffer = ByteArray(length)
+            var filled = 0
+            pfd.use {
+                while (filled < length) {
+                    val n = Os.pread(it.fileDescriptor, buffer, filled, length - filled, offset + filled)
+                    if (n <= 0) break // end of file
+                    filled += n
+                }
             }
-            Log.d(TAG, "readFile() read ${bytes.size} byte(s), encoding to base64")
 
             val ret = JSObject()
-            ret.put("base64", Base64.encodeToString(bytes, Base64.NO_WRAP))
+            ret.put("base64", Base64.encodeToString(buffer, 0, filled, Base64.NO_WRAP))
+            ret.put("length", filled)
             call.resolve(ret)
+        } catch (e: ErrnoException) {
+            Log.e(TAG, "readChunk() pread failed for $uriString (errno ${e.errno})", e)
+            if (e.errno == OsConstants.ESPIPE) {
+                call.reject("This file's storage doesn't support random access, so it can't be opened")
+            } else {
+                call.reject("Failed to read file: ${e.message}")
+            }
         } catch (e: OutOfMemoryError) {
-            Log.e(TAG, "readFile() out of memory reading $uriString", e)
-            call.reject("File is too large to open")
+            Log.e(TAG, "readChunk() out of memory reading $uriString", e)
+            call.reject("Out of memory while reading this file")
         } catch (t: Throwable) {
-            Log.e(TAG, "readFile() failed for $uriString", t)
+            Log.e(TAG, "readChunk() failed for $uriString", t)
             call.reject("Failed to read file: ${t.message}")
         }
     }

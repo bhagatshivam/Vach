@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { App as CapacitorApp } from '@capacitor/app';
-import { readFileBase64, type LibraryFile } from '../lib/libraryFolder';
+import type { LibraryFile } from '../lib/libraryFolder';
+import { FileTooLargeError, createFileSource, readAll } from '../lib/fileBridge';
 import type { PageKind, ParseEvent, PdfHandle } from '../lib/pdf';
 import { PdfPageLoader } from '../lib/pdfPageLoader';
 import { pushKind, shouldShowScannedNotice } from '../lib/scannedNotice';
@@ -71,17 +72,24 @@ const FONT_WAIT_TIMEOUT_MS = 2000;
 // in PdfHandle) kept alive past the initial streaming pass, for later
 // on-demand page rasterization - so this returns the handle alongside the
 // generator instead of just yielding straight through it.
+//
+// Bytes arrive through the chunked file bridge (fileBridge.ts): a PDF is read
+// range-by-range on demand by pdf.js; an EPUB is read once, chunk by chunk,
+// straight into one preallocated Uint8Array (no whole-file Base64 string).
 async function openBookStream(
-  base64: string,
+  uri: string,
   fileName: string,
+  signal: AbortSignal,
 ): Promise<{ generator: AsyncGenerator<ParseEvent>; pdfHandle: PdfHandle | null }> {
   if (fileName.toLowerCase().endsWith('.pdf')) {
+    const source = await createFileSource(uri, { signal });
     const { openPdf } = await import('../lib/pdf');
-    const handle = await openPdf(base64, fileName);
+    const handle = await openPdf(source, fileName);
     return { generator: handle.streamChapters(), pdfHandle: handle };
   }
+  const bytes = await readAll(uri, { signal });
   const { streamEpub } = await import('../lib/epub');
-  return { generator: streamEpub(base64, fileName), pdfHandle: null };
+  return { generator: streamEpub(bytes, fileName), pdfHandle: null };
 }
 
 const NAV_IDLE_MS = 3000;
@@ -137,6 +145,9 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
   useEffect(() => {
     let cancelled = false;
     let generator: AsyncGenerator<ParseEvent> | null = null;
+    // Stops in-flight chunked reads (and range requests, via the PDF handle)
+    // when the user backs out mid-open, instead of reading on for nobody.
+    const abortController = new AbortController();
 
     // Reset restore state for this specific file - a fresh mount-equivalent
     // each time `file` changes (App.tsx actually unmounts/remounts this
@@ -159,14 +170,17 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
       try {
         console.log('[ReaderScreen] load: reading file', file.uri);
         markOpened(file).catch((err) => console.error('[ReaderScreen] markOpened failed', err));
-        const [savedPosition, base64] = await Promise.all([
+        const [savedPosition, opened] = await Promise.all([
           loadPosition(file).catch((err) => {
             console.error('[ReaderScreen] loadPosition failed', err);
             return null;
           }),
-          readFileBase64(file.uri),
+          openBookStream(file.uri, file.name, abortController.signal),
         ]);
-        if (cancelled) return;
+        if (cancelled) {
+          opened.pdfHandle?.destroy();
+          return;
+        }
         if (savedPosition) {
           console.log('[ReaderScreen] load: restoring saved position', savedPosition.anchor);
           setRestoreTarget(savedPosition);
@@ -174,14 +188,9 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
           setContentRevealed(true);
         }
 
-        console.log('[ReaderScreen] load: read', base64.length, 'base64 chars, parsing', file.name);
+        console.log('[ReaderScreen] load: opened, parsing', file.name);
         setStatus('Parsing...');
 
-        const opened = await openBookStream(base64, file.name);
-        if (cancelled) {
-          opened.pdfHandle?.destroy();
-          return;
-        }
         pdfHandleRef.current = opened.pdfHandle;
         generator = opened.generator;
         let title = file.name;
@@ -244,7 +253,9 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
       } catch (err) {
         if (cancelled) return;
         console.error('[ReaderScreen] load: failed', err);
-        setError(String(err));
+        // FileTooLargeError's message is already a complete, user-facing
+        // sentence; String(err) would prefix it with the class name.
+        setError(err instanceof FileTooLargeError ? err.message : String(err));
         setStatus('Failed to open book.');
       }
     }
@@ -252,6 +263,7 @@ export default function ReaderScreen({ file, onBack }: ReaderScreenProps) {
     load();
     return () => {
       cancelled = true;
+      abortController.abort();
       // Signals the generator to stop at its next suspension point instead
       // of continuing to parse chapters nobody will ever see, e.g. when the
       // user backs out of a book mid-load.

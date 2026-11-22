@@ -9,7 +9,7 @@ function pngBytes(): Uint8Array {
   return Uint8Array.from(Buffer.from(PNG_1X1_RED_BASE64, 'base64'));
 }
 
-async function buildEpubBase64(chapterBodies: string[], imageName = 'cover.png'): Promise<string> {
+async function buildEpubBytes(chapterBodies: string[], imageName = 'cover.png'): Promise<Uint8Array> {
   const zip = new JSZip();
   zip.file(
     'META-INF/container.xml',
@@ -38,13 +38,13 @@ async function buildEpubBase64(chapterBodies: string[], imageName = 'cover.png')
 </package>`,
   );
 
-  return zip.generateAsync({ type: 'base64' });
+  return zip.generateAsync({ type: 'uint8array' });
 }
 
 async function sanitizedChapters(chapterBodies: string[]): Promise<string[]> {
-  const base64 = await buildEpubBase64(chapterBodies);
+  const bytes = await buildEpubBytes(chapterBodies);
   const chapters: string[] = [];
-  for await (const event of streamEpub(base64, 'test.epub')) {
+  for await (const event of streamEpub(bytes, 'test.epub')) {
     if (event.type === 'chapter') chapters.push(event.html);
   }
   return chapters;
@@ -54,7 +54,7 @@ async function sanitizedChapter(body: string): Promise<string> {
   return (await sanitizedChapters([body]))[0];
 }
 
-async function buildEpubBase64WithImageBytes(chapterBodies: string[], imageBytes: Uint8Array): Promise<string> {
+async function buildEpubBytesWithImageBytes(chapterBodies: string[], imageBytes: Uint8Array): Promise<Uint8Array> {
   const zip = new JSZip();
   zip.file(
     'META-INF/container.xml',
@@ -83,7 +83,7 @@ async function buildEpubBase64WithImageBytes(chapterBodies: string[], imageBytes
 </package>`,
   );
 
-  return zip.generateAsync({ type: 'base64' });
+  return zip.generateAsync({ type: 'uint8array' });
 }
 
 // NOTE on jsdom vs. Chromium: these tests run under jsdom (via vitest's
@@ -388,9 +388,9 @@ describe('per-entry decompressed-size cap (pathological chapters/images)', () =>
     'drops an image whose decompressed size exceeds the cap, same as an image that never resolves - it does not fail the chapter',
     async () => {
       const hugeImage = new Uint8Array(21 * 1024 * 1024).fill(65); // over the 20MB image cap
-      const base64 = await buildEpubBase64WithImageBytes(['<p>TEXT_MARKER</p><img src="../Images/cover.png" alt="x">'], hugeImage);
+      const bytes = await buildEpubBytesWithImageBytes(['<p>TEXT_MARKER</p><img src="../Images/cover.png" alt="x">'], hugeImage);
       const chapters: string[] = [];
-      for await (const event of streamEpub(base64, 'test.epub')) {
+      for await (const event of streamEpub(bytes, 'test.epub')) {
         if (event.type === 'chapter') chapters.push(event.html);
       }
       expect(chapters).toHaveLength(1);

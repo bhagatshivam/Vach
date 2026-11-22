@@ -57,7 +57,8 @@ interface LibraryFolderPlugin {
   pickFiles(): Promise<{ uris: string[] }>;
   scanFolder(options: { uri: string }): Promise<{ name: string; files: LibraryFile[] }>;
   statFile(options: { uri: string }): Promise<{ file: LibraryFile }>;
-  readFile(options: { uri: string }): Promise<{ base64: string }>;
+  getSize(options: { uri: string }): Promise<{ size: number }>;
+  readChunk(options: { uri: string; offset: number; length: number }): Promise<{ base64: string; length: number }>;
   hasPersistedPermission(options: { uri: string }): Promise<{ granted: boolean }>;
 }
 
@@ -217,8 +218,21 @@ export async function scanAllSources(): Promise<LibraryScanResult> {
   };
 }
 
-export async function readFileBase64(uri: string): Promise<string> {
-  console.log(LOG_TAG, 'readFileBase64:', uri);
-  const { base64 } = await LibraryFolder.readFile({ uri });
-  return base64;
+/**
+ * Raw bridge calls for the chunked byte path. Kept here (next to the plugin
+ * registration) and deliberately thin: all validation, decoding and
+ * assembly lives in fileBridge.ts, which takes these two as an injectable
+ * transport so it can be tested without a Capacitor runtime.
+ */
+export async function getFileSize(uri: string): Promise<number> {
+  const { size } = await LibraryFolder.getSize({ uri });
+  return size;
+}
+
+export async function readChunkBase64(
+  uri: string,
+  offset: number,
+  length: number,
+): Promise<{ base64: string; length: number }> {
+  return LibraryFolder.readChunk({ uri, offset, length });
 }

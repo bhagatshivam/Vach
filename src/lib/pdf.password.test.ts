@@ -30,6 +30,10 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('pdfjs-dist/legacy/build/pdf.mjs')>();
   return {
     OPS: actual.OPS,
+    // Real class: pdfRangeTransport.ts extends it at import time. It has no
+    // worker/network involvement until a listener is attached, so using the
+    // real one here is safe.
+    PDFDataRangeTransport: actual.PDFDataRangeTransport,
     GlobalWorkerOptions: {},
     getDocument: () => ({
       promise: Promise.reject(new FakePasswordException('No password given', 1)),
@@ -43,6 +47,7 @@ const { openPdf } = await import('./pdf');
 
 describe('openPdf - password-protected PDF', () => {
   it('turns a PasswordException into a clean, user-facing message instead of the raw technical error', async () => {
-    await expect(openPdf('ZmFrZQ==', 'test.pdf')).rejects.toThrow("This PDF is password-protected and can't be opened");
+    const source = { size: 4, read: async (begin: number, end: number) => new Uint8Array(end - begin) };
+    await expect(openPdf(source, 'test.pdf')).rejects.toThrow("This PDF is password-protected and can't be opened");
   });
 });
