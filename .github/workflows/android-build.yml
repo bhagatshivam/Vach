@@ -98,6 +98,19 @@ jobs:
       - name: Verify debug package identity
         run: .github/scripts/verify-apk-identity.sh android/app/build/outputs/apk/debug/app-debug.apk com.vach.reader.debug "Vach Debug"
 
+      - name: Report debug APK size
+        run: |
+          set -euo pipefail
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          BYTES=$(stat -c %s "$APK")
+          echo "Debug APK size: $BYTES bytes"
+          {
+            echo "### APK size"
+            echo "| Build | Bytes |"
+            echo "| :-- | --: |"
+            echo "| Debug (app-debug.apk) | $BYTES |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:

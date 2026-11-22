@@ -230,6 +230,19 @@ jobs:
           cp "$src" "$OUT_DIR/Vach.apk"
           echo "Collected $src as $OUT_DIR/Vach.apk"
 
+      - name: Report release APK size
+        if: ${{ !cancelled() && steps.apk.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          BYTES=$(stat -c %s "$OUT_DIR/Vach.apk")
+          echo "Release APK size: $BYTES bytes"
+          {
+            echo "### APK size"
+            echo "| Build | Bytes |"
+            echo "| :-- | --: |"
+            echo "| Release (Vach.apk) | $BYTES |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # The guards below all run even if an earlier one fails, so a single
       # run (especially a dry run) reports every problem at once.
       - name: Guard - no INTERNET permission in merged manifest

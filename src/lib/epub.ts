@@ -536,8 +536,8 @@ export function sanitizePlainTextOnly(rawHtml: string): string {
  * rest in the background - important for large books, where fully parsing
  * every chapter (and, previously, every image) up front could take minutes.
  */
-export async function* streamEpub(base64: string, fallbackTitle: string): AsyncGenerator<ParseEvent> {
-  const zip = await JSZip.loadAsync(base64, { base64: true });
+export async function* streamEpub(bytes: Uint8Array, fallbackTitle: string): AsyncGenerator<ParseEvent> {
+  const zip = await JSZip.loadAsync(bytes);
 
   const containerEntry = zip.file('META-INF/container.xml');
   if (!containerEntry) {

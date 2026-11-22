@@ -42,7 +42,7 @@ vi.mock('@capacitor/app', () => {
 // LibraryScreen's native-plugin dependency - irrelevant to back-button
 // wiring for most tests here, but one test below actually opens a book (to
 // mount ReaderScreen, which is where appStateChange gets registered), so a
-// real file + a working readFileBase64 are included too.
+// real file + a working chunked-read bridge (getFileSize/readChunkBase64) are included too.
 vi.mock('./lib/libraryFolder', () => ({
   scanAllSources: vi.fn(async () => ({
     sources: [{ source: { type: 'folder', uri: 'content://x' }, displayName: 'Books' }],
@@ -52,7 +52,8 @@ vi.mock('./lib/libraryFolder', () => ({
   addFolderSource: vi.fn(async () => {}),
   addFileSources: vi.fn(async () => {}),
   removeSource: vi.fn(async () => {}),
-  readFileBase64: vi.fn(async () => 'dGVzdA=='),
+  getFileSize: vi.fn(async () => 4),
+  readChunkBase64: vi.fn(async () => ({ base64: 'dGVzdA==', length: 4 })),
 }));
 
 // ReaderScreen dynamically imports epub.ts/pdf.ts - mocked here (not real

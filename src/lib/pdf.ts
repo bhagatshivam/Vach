@@ -18,6 +18,8 @@ import { OPS, type PDFDocumentProxy, type PDFPageProxy } from 'pdfjs-dist/legacy
 import pdfWorkerUrl from './pdfWorkerEntry.ts?worker&url';
 import { sanitizePlainTextOnly } from './epub';
 import { detectPdfCompatGaps, installPdfCompatPolyfills } from './pdfCompatPolyfills';
+import type { FileSource } from './fileBridge';
+import { BridgeRangeTransport, PDF_INITIAL_BYTES, PDF_RANGE_CHUNK_BYTES } from './pdfRangeTransport';
 
 // Logged once, main thread only - the worker's own copy of this check logs
 // from pdfWorkerEntry.ts, since it's a separate realm with its own
@@ -152,15 +154,6 @@ function reconstructPage(items: PositionedTextItem[]): string {
       return `<${tag}>${escapeHtml(block.text)}</${tag}>`;
     })
     .join('\n');
-}
-
-function base64ToBytes(base64: string): Uint8Array {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
 }
 
 // ---------------------------------------------------------------------------
@@ -551,17 +544,62 @@ export interface PdfHandle {
 }
 
 /**
+ * Re-yields the page stream, but turns a failed bridge read into a thrown
+ * error. pdf.js has no error channel for range requests: when a read fails
+ * the document is torn down (see openPdf) and each pending page just
+ * rejects with an unhelpful "destroyed" message, which the per-page handler
+ * above would swallow into "[This page could not be loaded]" placeholders.
+ * Checking the transport's own recorded error first surfaces the real cause
+ * once, instead.
+ */
+async function* surfaceBridgeErrors(
+  events: AsyncGenerator<ParseEvent>,
+  transport: BridgeRangeTransport,
+): AsyncGenerator<ParseEvent> {
+  for await (const event of events) {
+    if (transport.fatalError) throw transport.fatalError;
+    yield event;
+  }
+  if (transport.fatalError) throw transport.fatalError;
+}
+
+/**
  * Opens a PDF and returns a handle that can both stream its pages as text/
  * placeholder HTML and, later, rasterize any page on demand - the
  * PDFDocumentProxy this opens is kept alive in the closure below for that
  * later on-demand use, not just for the duration of the initial streaming
  * pass, until destroy() is called (by the reader screen, on unmount).
+ *
+ * Bytes come from `source` through a PDFDataRangeTransport: pdf.js requests
+ * only the ranges it needs and the whole file is never held as a Base64
+ * string or a second full-size copy on the main thread. (pdf.js itself
+ * still keeps a full-length buffer in its worker, and the text pass below
+ * still visits every page, so memory is about 1x the file size - flat
+ * memory needs lazy per-page extraction, a later phase.)
  */
-export async function openPdf(base64: string, fallbackTitle: string): Promise<PdfHandle> {
+export async function openPdf(source: FileSource, fallbackTitle: string): Promise<PdfHandle> {
+  const initialLength = Math.min(source.size, PDF_INITIAL_BYTES);
+  const initialData = await source.read(0, initialLength);
+  const transport = new BridgeRangeTransport(source.size, initialData, initialLength >= source.size, source.read);
+
+  const loadingTask = pdfjsLib.getDocument({
+    range: transport,
+    rangeChunkSize: PDF_RANGE_CHUNK_BYTES,
+    // Ask for ranges on demand only (no background fetch of the whole rest
+    // of the file) and don't use the progressive "stream" mode, which would
+    // make pdf.js ignore the line above.
+    disableAutoFetch: true,
+    disableStream: true,
+  });
+  transport.onFatal = () => {
+    loadingTask.destroy().catch((err) => console.error('[pdf] destroy after bridge failure failed', err));
+  };
+
   let doc: PDFDocumentProxy;
   try {
-    doc = await pdfjsLib.getDocument({ data: base64ToBytes(base64) }).promise;
+    doc = await loadingTask.promise;
   } catch (err) {
+    if (transport.fatalError) throw transport.fatalError;
     // No onPassword callback is passed above - there's no password-entry UI
     // yet - so pdf.js rejects immediately for any encrypted PDF with a
     // PasswordException (identified by .name, since importing the class
@@ -579,7 +617,7 @@ export async function openPdf(base64: string, fallbackTitle: string): Promise<Pd
 
   return {
     streamChapters() {
-      return streamChaptersImpl(doc, fallbackTitle);
+      return surfaceBridgeErrors(streamChaptersImpl(doc, fallbackTitle), transport);
     },
     renderPageImage(pageNumber, viewportWidthPx, devicePixelRatio) {
       return renderPageImageImpl(doc, pageNumber, viewportWidthPx, devicePixelRatio);
@@ -587,6 +625,7 @@ export async function openPdf(base64: string, fallbackTitle: string): Promise<Pd
     destroy() {
       if (destroyed) return;
       destroyed = true;
+      transport.abort();
       // PDFDocumentProxy itself has no destroy() - releasing the document
       // (worker thread, transport, cached pages) goes through its
       // loadingTask, per pdf.js's own API. Fire-and-forget: callers (the
