@@ -57,6 +57,7 @@ Do this before writing any cache, worker or lazy-ZIP code. Produce a short repor
 4. How are chapters mounted today (all at once? appended lazily?) and how are images created (data URLs? blob URLs?)?
 5. Does a Table of Contents drawer already exist? Is there in-book search?
 6. Is the Android `INTERNET` permission declared in the release manifest? If the app works without it (test it), remove it for release builds so "zero network" is enforced by the OS, not just by CSP. Keep it only for debug/live-reload if needed.
+   > **Closed — see A8.** The permission is already absent and CI-verified.
 7. Record the baseline APK size.
 
 ### 2.2 Baseline measurements (on the real phone, using T1, T2, T6)
@@ -80,9 +81,13 @@ Use Chrome remote debugging (`chrome://inspect`) and `adb shell dumpsys meminfo 
 
 **Acceptance for Step 0:** report committed; T6 opens without memory spikes proportional to file size; T1 still renders exactly as before; APK size recorded.
 
+> **Amended — see A1.** The "no memory spikes proportional to file size" criterion is superseded: after the bridge fix, memory for a huge PDF should be about 1× the file size, not 6–8×.
+
 ---
 
 ## 3. Run Order (by dependency)
+
+> **Superseded — see A9 for the current run order.** The table below is the original order, kept for reference.
 
 | Order | Work | Why here |
 | :-- | :-- | :-- |
@@ -101,6 +106,8 @@ Use Chrome remote debugging (`chrome://inspect`) and `adb shell dumpsys meminfo 
 ## 4. Phase 4 — Adaptive Tables, Clean Text & Devanagari
 
 **Goal:** Remove horizontal scrolling for tables and long strings while keeping the text DOM untouched, and render Devanagari and special characters sharply.
+
+> **Amended — see A4 (`.scroll-x` removal, anchor versioning, re-anchoring) and A5 (woff2-only fonts, APK baseline).**
 
 ### 4.1 Measured adaptive table engine — `src/lib/tableAdapter.ts`
 
@@ -148,6 +155,8 @@ Runs **on the main thread**, per chapter, right after sanitization and before/at
 
 **Goal:** Clean images on every screen size, safe RAM use, no layout jumps, Night Mode safe.
 
+> **Amended — see A3.** The `blob:` URL approach below requires changing the CSP and the DOMPurify `src` hook; both currently block `blob:`.
+
 ### 5.1 `src/lib/imageProcessor.ts`
 
 - Decode with `createImageBitmap()`. Downscale anything wider than `Math.min(viewportWidth * devicePixelRatio, 1600)` using `OffscreenCanvas`, output WebP/JPEG. Skip the work for images already small enough.
@@ -176,6 +185,8 @@ T4 images never shift text while loading; no crash with 4000×6000 images; Night
 
 ## 6. Phase 5a — Table of Contents Drawer *(only if Step 0 found none)*
 
+> **Amended — see A7.** Step 0 found none; this phase is required.
+
 `src/components/TocDrawer.tsx`: normalize EPUB (`nav.xhtml` / `toc.ncx`), PDF (`pdf.getOutline()`), and DOCX (`<h1>`–`<h2>` slices) into one `TocItem[]` tree. Highlight the current item, show overall progress percentage, tap to jump. If a TOC already exists, only extend it to cover DOCX when Phase 2 lands.
 
 ---
@@ -183,6 +194,8 @@ T4 images never shift text while loading; no crash with 4000×6000 images; Night
 ## 7. Phase 2 — Offline Word (`.docx`) Support
 
 **Goal:** Read `.docx` with Vach's themes, fonts, continuous scroll and TOC.
+
+> **Amended — see A6.** The extension filter lives in three places and `.docx` must never reach the EPUB parser.
 
 1. **Scanner/UI:** extend `libraryFolder.ts` (and any native extension filter) for `.docx` / `application/vnd.openxmlformats-officedocument.wordprocessingml.document`. Add a `.fmt-badge.docx` style.
 2. **Mammoth worker test first.** Try `mammoth` inside `parser.worker.ts`. If any code path needs `window`/`document`, run mammoth on the main thread in an async, chunked flow instead. Either way, **DOMPurify and `tableAdapter` run on the main thread.**
@@ -198,6 +211,8 @@ T4 images never shift text while loading; no crash with 4000×6000 images; Night
 ## 8. Phase 1 — Huge-Book Speed (measure, then optimize)
 
 **Goal:** Keep 1,500-chapter EPUBs and multi-hundred-MB PDFs responsive without breaking `readerAnchor.ts`.
+
+> **Amended — see A2.** Phase 1 is no longer purely measurement-gated: a mandatory Phase 1b is split out, and a Phase 1c (lazy per-page PDF text) is added. Windowed unmounting (step 6 below) stays gated behind measurements.
 
 1. **Re-measure** with the Step 0 method (T2, T6, T7) now that the new pipelines exist. Optimize only what the numbers show.
 2. **`src/lib/bookCache.ts` (IndexedDB via `idb`):** cache `BookIndex` records — title, author, TOC, chapter count, ZIP byte offsets, word count — keyed by `(fileUri, fileSize, lastModified)`. Warm reopen skips re-parsing.
@@ -268,3 +283,37 @@ docs/
 ## 13. Kick-off prompt template for each Claude Code session
 
 > Read `vach_upgrade_blueprint_v3.md`. We are doing **<phase name>** now. First read the real code for every file this phase touches and tell me where it differs from the blueprint. Then implement on branch `upgrade/<phase-name>`, add the tests listed, and finish with the acceptance checklist, the APK size before/after, and anything you could not verify without the phone. Do not start any other phase.
+
+---
+
+## 14. Amendments after Step 0 audit
+
+These amendments come from the Step 0 audit (`docs/step0-audit.md`, branch `upgrade/step0-audit`). Where they conflict with earlier sections, **these win**; the earlier text is marked "Amended" or "Superseded" in place. Reference baseline: **v1.9.0 `Vach.apk` = 6,103,562 bytes**.
+
+**A1. Step 0 acceptance is reworded (overrides §2.3 "Acceptance for Step 0").** After the bridge fix, memory for a huge PDF should be about **1× the file size**, not 6–8×. It cannot be flat, because the pdf.js `ChunkedStream` allocates a full-length buffer and `streamChaptersImpl` extracts text for every page. Flat memory needs per-page lazy extraction (new **Phase 1c**).
+
+**A2. Phase 1 is no longer purely conditional (amends §8).** Confirmed from code: all chapters stay mounted, each append re-renders the whole list (quadratic), and restoring at chapter N parses chapters 1..N. A new **Phase 1b is mandatory**: an EPUB ZIP central-directory reader, restoring directly to the saved chapter, and a memoized chapter list so appends do not re-render existing chapters. Windowed unmounting stays gated behind measurements.
+
+**A3. Phase 3A must change the CSP and the DOMPurify `src` hook (amends §5).** Add `blob:` to `img-src` (it is local; no network), and update the `src` hook, because both currently block `blob:` URLs.
+
+**A4. Phase 4 anchors and `.scroll-x` (amends §4.1, §4.2).** `.scroll-x` is also created in `epub.ts` and special-cased in `readerAnchor.ts`; removing it shifts `blockIndex`. Add an **anchor version field**; old anchors fall back to chapter start. Also add **explicit re-anchoring** on font-size change, rotation and table re-adaptation (capture the anchor before, restore after), since nothing does this today.
+
+**A5. Phase 4 fonts (amends §4.3).** Ship **woff2 only** (drop the redundant `.woff` files, about 1.2 MB). Verify woff2 support against the app's minimum WebView first. Use the savings to fund Devanagari. APK baseline: **v1.9.0 `Vach.apk` = 6,103,562 bytes**.
+
+**A6. Phase 2 extension filter (amends §7).** The `.docx` extension filter is in three places: `LibraryFolderPlugin.kt`, `libraryText.ts`, and `openBookStream`. Update all three, and make sure `.docx` is never routed to the EPUB parser.
+
+**A7. Phase 5a (amends §6).** TOC is confirmed absent, and in-book search is also absent.
+
+**A8. Step 0 item 6 is closed (amends §2.1).** The `INTERNET` permission is already absent and CI-verified for both debug and release builds.
+
+**A9. New run order (supersedes §3):**
+
+1. Byte bridge
+2. Phase 1b
+3. Phase 4
+4. Phase 3A
+5. TOC (Phase 5a)
+6. Phase 2 (`.docx`)
+7. Phase 1c: lazy per-page PDF text + cache, if measurements justify
+8. M2b (Phase 3B)
+9. Search (Phase 5b)
