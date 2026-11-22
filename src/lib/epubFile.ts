@@ -51,7 +51,7 @@ export async function openEpubFile(
   const wholeFileMax = options.wholeFileMaxBytes ?? EPUB_WHOLE_FILE_MAX_BYTES;
 
   if (source.size <= wholeFileMax) {
-    const bytes = await readAll(uri, options);
+    const bytes = await readAll(uri, { ...options, knownSize: source.size });
     const zip = await JSZip.loadAsync(bytes);
     return openEpub(archiveFromJSZip(zip), fallbackTitle);
   }

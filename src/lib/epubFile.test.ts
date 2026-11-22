@@ -112,6 +112,14 @@ describe('openEpubFile - size threshold', () => {
     expect(reads.length).toBe(before);
   });
 
+  it('asks the native side for the size only once on the whole-file path', async () => {
+    const file = await buildEpub({ chapters: 4 });
+    const { transport } = fakeTransport(file);
+    const getSize = vi.spyOn(transport, 'getSize');
+    await openEpubFile('u', 'x.epub', { transport });
+    expect(getSize).toHaveBeenCalledTimes(1);
+  });
+
   it('a file exactly at the threshold is read whole; one byte over is ranged', async () => {
     // Padding makes the file bigger than the 64 KiB tail read, so "ranged" is visible in the offsets.
     const file = await buildEpub({ chapters: 4, paddingBytes: 300 * 1024 });
