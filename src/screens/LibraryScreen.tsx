@@ -12,6 +12,7 @@ import { cleanTitle, detectFormat, matchesQuery } from '../lib/libraryText';
 import { DEFAULT_SORT_MODE, SORT_MODE_OPTIONS, loadSortMode, saveSortMode, sortFiles, type SortMode } from '../lib/librarySort';
 import { bookKey, ensureIndexLoaded, getProgressIndexSync, isFinished } from '../lib/readingPosition';
 import { DEFAULT_READER_SETTINGS, THEME_COLORS, getReaderSettings, type ReaderSettings } from '../lib/readerSettings';
+import { useSystemTheme } from '../lib/systemTheme';
 
 interface LibraryScreenProps {
   onOpenBook: (file: LibraryFile) => void;
@@ -40,6 +41,12 @@ function SearchIcon() {
       <line x1="21" y1="21" x2="16.65" y2="16.65" />
     </svg>
   );
+}
+
+/** The native pickers reject with "... was cancelled" when the user backs out. */
+function isPickerCancellation(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : typeof err === 'string' ? err : String((err as { message?: unknown } | null)?.message ?? '');
+  return /cancel/i.test(message);
 }
 
 interface BookRowProps {
@@ -78,6 +85,7 @@ function BookRow({ file, title, progressFraction, onOpen }: BookRowProps) {
 
 export default function LibraryScreen({ onOpenBook, sheetCloseRef }: LibraryScreenProps) {
   const [settings, setSettings] = useState<ReaderSettings>(DEFAULT_READER_SETTINGS);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [sources, setSources] = useState<SourceInfo[]>([]);
   const [failedSources, setFailedSources] = useState<FailedSourceInfo[]>([]);
   const [files, setFiles] = useState<LibraryFile[]>([]);
@@ -93,7 +101,10 @@ export default function LibraryScreen({ onOpenBook, sheetCloseRef }: LibraryScre
   const [progressTick, setProgressTick] = useState(0);
 
   useEffect(() => {
-    getReaderSettings().then(setSettings);
+    getReaderSettings().then((loaded) => {
+      setSettings(loaded);
+      setSettingsLoaded(true);
+    });
   }, []);
 
   useEffect(() => {
@@ -185,8 +196,7 @@ export default function LibraryScreen({ onOpenBook, sheetCloseRef }: LibraryScre
       await addFolderSource();
       await loadLibrary();
     } catch (err) {
-      console.error('[LibraryScreen] handleAddFolder: failed', err);
-      setError(String(err));
+      reportPickerFailure('handleAddFolder', err);
     }
   }
 
@@ -197,9 +207,18 @@ export default function LibraryScreen({ onOpenBook, sheetCloseRef }: LibraryScre
       await addFileSources();
       await loadLibrary();
     } catch (err) {
-      console.error('[LibraryScreen] handleAddFiles: failed', err);
-      setError(String(err));
+      reportPickerFailure('handleAddFiles', err);
     }
+  }
+
+  // Backing out of the system picker is not an error: no red message for it.
+  function reportPickerFailure(where: string, err: unknown) {
+    if (isPickerCancellation(err)) {
+      console.log(`[LibraryScreen] ${where}: picker cancelled`);
+      return;
+    }
+    console.error(`[LibraryScreen] ${where}: failed`, err);
+    setError(String(err));
   }
 
   async function handleRemoveSource(uri: string) {
@@ -227,110 +246,124 @@ export default function LibraryScreen({ onOpenBook, sheetCloseRef }: LibraryScre
 
   const themeColors = settings.theme === 'custom' ? { background: settings.customBackground, text: settings.customText } : THEME_COLORS[settings.theme];
   const rootStyle: CSSProperties = { background: themeColors.background, color: themeColors.text };
+  // Page background + status/navigation bars follow the theme (once the saved theme is known).
+  useSystemTheme(themeColors.background, themeColors.text, settingsLoaded);
 
   const isFirstLaunchEmpty = sources.length === 0 && failedSources.length === 0 && !scanning;
 
   return (
     <div className="library" style={rootStyle}>
-      <header className="app-header">
-        <div className="wordmark">
-          <span className="devanagari">वाच</span>
-          <span className="latin">Vach</span>
-        </div>
-        <button className="icon-btn" onClick={() => setSheetOpen(true)} aria-label="Sources and settings">
-          &#9881;
-        </button>
-      </header>
-
-      {failedSources.map((f) => (
-        <div key={f.source.uri} className="perm-banner">
-          <span aria-hidden="true">&#9888;</span>
-          <span>
-            <strong>Can&apos;t access &quot;{f.displayName}&quot;</strong> - {PERMISSION_REASON_TEXT[f.reason]}.
-          </span>
-          <button className="banner-remove-btn" onClick={() => handleRemoveSource(f.source.uri)}>
-            Remove
-          </button>
-        </div>
-      ))}
-
-      {error && <p className="error">{error}</p>}
-
-      {continueReading && (
-        <button className="continue-reading" onClick={() => onOpenBook(continueReading.file)}>
-          <span className="continue-label">Continue reading</span>
-          <span className="continue-title">{continueReading.title}</span>
-          <span className="continue-progress">{Math.round(continueReading.progressFraction * 100)}%</span>
-        </button>
-      )}
-
-      {isFirstLaunchEmpty ? (
-        <div className="empty-state">
-          <div className="glyph" aria-hidden="true">
-            &#128214;
+      <div className="library-column">
+        <header className="app-header">
+          <div className="wordmark">
+            <span className="devanagari">वाच</span>
+            <span className="latin">Vach</span>
           </div>
-          <h2>Your library is empty</h2>
-          <p>Add a folder of EPUB or PDF files from your device to start reading. Nothing leaves your phone.</p>
-          <button className="primary-btn" onClick={handleAddFolder}>
-            + Add folder
-          </button>
-        </div>
-      ) : (
-        <>
-          <div className="search-wrap">
-            <div className="search-box">
-              <SearchIcon />
-              <input
-                type="text"
-                value={searchInput}
-                onChange={(e) => setSearchInput(e.target.value)}
-                placeholder="Search your library"
-                aria-label="Search your library"
-              />
-              {searchInput && (
-                <button className="clear-btn" onClick={() => setSearchInput('')} aria-label="Clear search">
-                  &times;
-                </button>
-              )}
-            </div>
+          <div className="header-actions">
+            <button className="icon-btn add-btn" onClick={() => setSheetOpen(true)} aria-label="Add books">
+              + Add
+            </button>
+            <button className="icon-btn" onClick={() => setSheetOpen(true)} aria-label="Sources and settings">
+              &#9881;
+            </button>
           </div>
+        </header>
 
-          {scanning && (
-            <div className="scan-row">
-              <span className="spinner" aria-hidden="true" /> Scanning your library...
-            </div>
-          )}
-
-          <div className="list-toolbar">
-            <span className="count">
-              {visibleFiles.length} book{visibleFiles.length === 1 ? '' : 's'}
+        {failedSources.map((f) => (
+          <div key={f.source.uri} className="perm-banner">
+            <span aria-hidden="true">&#9888;</span>
+            <span>
+              <strong>Can&apos;t access &quot;{f.displayName}&quot;</strong> - {PERMISSION_REASON_TEXT[f.reason]}.
             </span>
-            <div className="sort-toggle" role="group" aria-label="Sort order">
-              {SORT_MODE_OPTIONS.map((opt) => (
-                <button
-                  key={opt.id}
-                  className={sortMode === opt.id ? 'active' : ''}
-                  onClick={() => handleSortModeChange(opt.id)}
-                >
-                  {opt.label}
-                </button>
-              ))}
+            <button className="banner-remove-btn" onClick={() => handleRemoveSource(f.source.uri)}>
+              Remove
+            </button>
+          </div>
+        ))}
+
+        {error && <p className="error">{error}</p>}
+
+        {continueReading && (
+          <button className="continue-reading" onClick={() => onOpenBook(continueReading.file)}>
+            <span className="continue-label">Continue reading</span>
+            <span className="continue-title">{continueReading.title}</span>
+            <span className="continue-progress">{Math.round(continueReading.progressFraction * 100)}%</span>
+          </button>
+        )}
+
+        {isFirstLaunchEmpty ? (
+          <div className="empty-state">
+            <div className="glyph" aria-hidden="true">
+              &#128214;
+            </div>
+            <h2>Your library is empty</h2>
+            <p>Add a folder of EPUB or PDF files, or just a few files, from your device to start reading. Nothing leaves your phone.</p>
+            <div className="empty-actions">
+              <button className="primary-btn" onClick={handleAddFolder}>
+                + Add folder
+              </button>
+              <button className="primary-btn" onClick={handleAddFiles}>
+                + Add files
+              </button>
             </div>
           </div>
+        ) : (
+          <>
+            <div className="search-wrap">
+              <div className="search-box">
+                <SearchIcon />
+                <input
+                  type="text"
+                  value={searchInput}
+                  onChange={(e) => setSearchInput(e.target.value)}
+                  placeholder="Search your library"
+                  aria-label="Search your library"
+                />
+                {searchInput && (
+                  <button className="clear-btn" onClick={() => setSearchInput('')} aria-label="Clear search">
+                    &times;
+                  </button>
+                )}
+              </div>
+            </div>
 
-          {visibleFiles.length === 0 && !scanning ? (
-            <p className="empty">
-              {debouncedQuery ? <>No books match &quot;{debouncedQuery}&quot;.</> : 'No .pdf or .epub files found in the added sources.'}
-            </p>
-          ) : (
-            <ul className="book-list">
-              {visibleFiles.map(({ file, title, progressFraction }) => (
-                <BookRow key={file.uri} file={file} title={title} progressFraction={progressFraction} onOpen={() => onOpenBook(file)} />
-              ))}
-            </ul>
-          )}
-        </>
-      )}
+            {scanning && (
+              <div className="scan-row">
+                <span className="spinner" aria-hidden="true" /> Scanning your library...
+              </div>
+            )}
+
+            <div className="list-toolbar">
+              <span className="count">
+                {visibleFiles.length} book{visibleFiles.length === 1 ? '' : 's'}
+              </span>
+              <div className="sort-toggle" role="group" aria-label="Sort order">
+                {SORT_MODE_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.id}
+                    className={sortMode === opt.id ? 'active' : ''}
+                    onClick={() => handleSortModeChange(opt.id)}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {visibleFiles.length === 0 && !scanning ? (
+              <p className="empty">
+                {debouncedQuery ? <>No books match &quot;{debouncedQuery}&quot;.</> : 'No .pdf or .epub files found in the added sources.'}
+              </p>
+            ) : (
+              <ul className="book-list">
+                {visibleFiles.map(({ file, title, progressFraction }) => (
+                  <BookRow key={file.uri} file={file} title={title} progressFraction={progressFraction} onOpen={() => onOpenBook(file)} />
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+      </div>
 
       {sheetOpen && (
         <div className="sheet-overlay" onClick={closeSheet}>
