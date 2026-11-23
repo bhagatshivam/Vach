@@ -42,11 +42,31 @@ describe('flattenToLeafBlocks', () => {
     expect(blocks.map((b) => b.tagName.toLowerCase())).toEqual(['li', 'li']);
   });
 
-  it('treats the .scroll-x wrapper as one atomic leaf, not recursing into the table/pre inside it', () => {
-    const chapter = el('<section><div class="scroll-x"><table><tr><td>a</td></tr></table></div></section>');
+  it('treats a <table> as one atomic leaf, not recursing into its cells', () => {
+    const chapter = el('<section><table><tbody><tr><td><p>a</p></td></tr></tbody></table></section>');
     const blocks = flattenToLeafBlocks(chapter);
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].className).toBe('scroll-x');
+    expect(blocks[0].tagName.toLowerCase()).toBe('table');
+  });
+
+  it('treats a <pre> as one atomic leaf', () => {
+    const chapter = el('<section><p>x</p><pre>code\nmore</pre><p>y</p></section>');
+    expect(flattenToLeafBlocks(chapter).map((b) => b.tagName.toLowerCase())).toEqual(['p', 'pre', 'p']);
+  });
+
+  it('never counts reader chrome (data-vach-ui) as a block, wherever it sits', () => {
+    const chapter = el(
+      '<section><p>before</p><div data-vach-ui><button>Expand Grid</button></div><table><tr><td>c</td></tr></table><p>after</p></section>',
+    );
+    expect(flattenToLeafBlocks(chapter).map((b) => b.tagName.toLowerCase())).toEqual(['p', 'table', 'p']);
+  });
+
+  it('a container holding only a table is still just that one table block, with or without reader chrome next to it', () => {
+    const plain = el('<section><div><table><tr><td>c</td></tr></table></div></section>');
+    const withChrome = el('<section><div><div data-vach-ui>chrome</div><table><tr><td>c</td></tr></table></div></section>');
+    expect(flattenToLeafBlocks(plain)).toHaveLength(1);
+    expect(flattenToLeafBlocks(withChrome)).toHaveLength(1);
+    expect(flattenToLeafBlocks(withChrome)[0].tagName.toLowerCase()).toBe('table');
   });
 
   it('falls back to treating a generic container as a leaf when it has no leaf descendants (bare inline content)', () => {
@@ -237,4 +257,90 @@ describe('computeProgressFraction', () => {
     const anchor = { chapterIndex: 4, blockIndex: 0, blockFraction: 0.9 }; // blockFraction irrelevant with 0 blocks
     expect(computeProgressFraction(anchor, 0, 10)).toBeCloseTo(0.4);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Removing the old <div class="scroll-x"> wrapper must not move any saved
+// blockIndex. Before this change every <table> and <pre> was wrapped in that
+// div and the DIV was the leaf block; now the table/pre itself is the leaf.
+// This reproduces the OLD algorithm verbatim and checks, over a corpus of
+// chapter structures, that it and the current one pick the same blocks in the
+// same order - so an anchor saved by the old code points at the same content.
+// ---------------------------------------------------------------------------
+
+const OLD_LEAF_TAGS = new Set(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'pre', 'blockquote', 'figure', 'img', 'table']);
+
+function oldIsLeaf(node: Element): boolean {
+  if (node.classList.contains('scroll-x')) return true;
+  return OLD_LEAF_TAGS.has(node.tagName.toLowerCase());
+}
+
+function oldFlatten(root: Element): Element[] {
+  const result: Element[] = [];
+  function walk(node: Element): void {
+    for (const child of Array.from(node.children)) {
+      if (oldIsLeaf(child)) {
+        result.push(child);
+        continue;
+      }
+      const before = result.length;
+      walk(child);
+      if (result.length === before) result.push(child);
+    }
+  }
+  walk(root);
+  return result;
+}
+
+/** What the old sanitizer's wrapWideElements did to every <table> and <pre> (document order, inner ones too). */
+function oldWrap(root: Element): void {
+  for (const node of Array.from(root.querySelectorAll('table, pre'))) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'scroll-x';
+    node.replaceWith(wrapper);
+    wrapper.appendChild(node);
+  }
+}
+
+const TABLE = '<table><thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>';
+const NESTED = '<table><tbody><tr><td>outer<table><tbody><tr><td>inner</td></tr></tbody></table></td></tr></tbody></table>';
+
+const CORPUS: Record<string, string> = {
+  'table between paragraphs': `<p>one</p>${TABLE}<p>two</p>`,
+  'pre between paragraphs': '<p>one</p><pre>code</pre><p>two</p>',
+  'table and pre back to back': `${TABLE}<pre>x</pre><pre>y</pre>${TABLE}`,
+  'nested tables': `<p>a</p>${NESTED}<p>b</p>`,
+  'pre inside a table cell': '<table><tbody><tr><td><pre>cell code</pre></td></tr></tbody></table><p>after</p>',
+  'table inside a generic div': `<div><p>a</p><div>${TABLE}</div><p>b</p></div>`,
+  'table as the only child of nested wrappers': `<div><span><div>${TABLE}</div></span></div>`,
+  'table inside a list item (the li is the leaf)': `<ul><li>item ${TABLE}</li><li>next</li></ul>`,
+  'table inside a blockquote (the blockquote is the leaf)': `<blockquote>${TABLE}</blockquote><p>x</p>`,
+  'table inside a figure (the figure is the leaf)': `<figure>${TABLE}<figcaption>c</figcaption></figure><p>x</p>`,
+  'table directly in a list': `<ul>${'<li>a</li>'}</ul>${TABLE}<ol><li>b</li></ol>`,
+  'headings, table, headings': `<h2>T</h2>${TABLE}<h3>U</h3>`,
+  'text-only container next to a table': `<div>bare text</div>${TABLE}<span>more bare text</span>`,
+  'many tables': Array.from({ length: 6 }, () => `<p>p</p>${TABLE}`).join(''),
+  'pre inside a div inside a div': '<div><div><pre>a</pre><p>x</p></div></div>',
+  'no tables at all': '<h2>t</h2><p>a</p><p>b</p><ul><li>c</li></ul>',
+};
+
+describe('removing the .scroll-x wrapper keeps every blockIndex pointing at the same content', () => {
+  for (const [name, html] of Object.entries(CORPUS)) {
+    it(`${name}: same blocks, same order, same indexes`, () => {
+      const oldChapter = el(`<section>${html}</section>`);
+      oldWrap(oldChapter);
+      const newChapter = el(`<section>${html}</section>`);
+
+      const oldBlocks = oldFlatten(oldChapter);
+      const newBlocks = flattenToLeafBlocks(newChapter);
+
+      expect(newBlocks.length).toBe(oldBlocks.length);
+      // An old wrapper block holds the table/pre that is the new block.
+      oldBlocks.forEach((oldBlock, index) => {
+        const wrapped = oldBlock.classList.contains('scroll-x') ? oldBlock.firstElementChild! : oldBlock;
+        expect(wrapped.tagName).toBe(newBlocks[index].tagName);
+        expect(wrapped.textContent).toBe(newBlocks[index].textContent);
+      });
+    });
+  }
 });

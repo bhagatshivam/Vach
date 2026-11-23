@@ -85,17 +85,29 @@ export async function saveReaderSettings(settings: ReaderSettings): Promise<void
 }
 
 // Offline app, zero network calls ever - fonts beyond the two generic system
-// stacks are bundled locally via @fontsource (imported in main.tsx) rather
-// than loaded from a CDN. Literata (Google Play Books' own serif),
+// stacks are bundled locally via @fontsource (see src/fonts.css, woff2 only)
+// rather than loaded from a CDN. Literata (Google Play Books' own serif),
 // Merriweather (one of the most widely used prose serifs on the web), and
 // Atkinson Hyperlegible (purpose-built for legibility) were all picked
 // specifically for long-form reading, not just popularity.
+//
+// None of them has Devanagari (Marathi, Hindi, Sanskrit), so every stack
+// names Devanagari-capable families AFTER the reading font and BEFORE the
+// generic keyword: Latin text is set in the chosen font, Devanagari falls to
+// the first of these the device has - Noto Sans/Serif Devanagari ship with
+// Android; Nirmala UI and Mangal cover Windows for desktop testing - and, if
+// none is named, the browser's own per-script fallback still applies. No font
+// file is bundled for it; that is only worth the APK bytes if a real device
+// shows missing-glyph boxes.
+const DEVANAGARI_SERIF = '"Noto Serif Devanagari", "Noto Sans Devanagari", "Nirmala UI", Mangal';
+const DEVANAGARI_SANS = '"Noto Sans Devanagari", "Noto Serif Devanagari", "Nirmala UI", Mangal';
+
 export const FONT_FAMILY_OPTIONS: { id: FontFamily; label: string; stack: string }[] = [
-  { id: 'serif', label: 'Serif', stack: 'Georgia, Cambria, "Times New Roman", Times, serif' },
-  { id: 'sans', label: 'Sans', stack: 'system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif' },
-  { id: 'literata', label: 'Literata', stack: '"Literata", Georgia, serif' },
-  { id: 'merriweather', label: 'Merriweather', stack: '"Merriweather", Georgia, serif' },
-  { id: 'atkinson', label: 'Atkinson', stack: '"Atkinson Hyperlegible", system-ui, sans-serif' },
+  { id: 'serif', label: 'Serif', stack: `Georgia, Cambria, "Times New Roman", Times, ${DEVANAGARI_SERIF}, serif` },
+  { id: 'sans', label: 'Sans', stack: `system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, ${DEVANAGARI_SANS}, sans-serif` },
+  { id: 'literata', label: 'Literata', stack: `"Literata", Georgia, ${DEVANAGARI_SERIF}, serif` },
+  { id: 'merriweather', label: 'Merriweather', stack: `"Merriweather", Georgia, ${DEVANAGARI_SERIF}, serif` },
+  { id: 'atkinson', label: 'Atkinson', stack: `"Atkinson Hyperlegible", system-ui, ${DEVANAGARI_SANS}, sans-serif` },
 ];
 
 export const FONT_FAMILY_STACKS: Record<FontFamily, string> = Object.fromEntries(

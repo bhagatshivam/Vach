@@ -323,50 +323,74 @@ describe('sanitizeChapterHtml - legitimate content survives (feature matrix)', (
   });
 });
 
-describe('sanitizeChapterHtml - wraps <table>/<pre> in .scroll-x (wide-content containment)', () => {
-  it('wraps a <table> in <div class="scroll-x">', async () => {
+describe('sanitizeChapterHtml - tables and <pre> are left as they are (no scroll box)', () => {
+  it('does not wrap a <table> in anything', async () => {
     const html = await sanitizedChapter('<table><tbody><tr><td>cell</td></tr></tbody></table>');
-    expect(html).toMatch(/<div class="scroll-x"><table>/);
+    expect(html).toBe('<table><tbody><tr><td>cell</td></tr></tbody></table>');
   });
 
-  it('wraps a <pre> in <div class="scroll-x">', async () => {
+  it('does not wrap a <pre> in anything', async () => {
     const html = await sanitizedChapter('<pre>some text</pre>');
-    expect(html).toMatch(/<div class="scroll-x"><pre>/);
+    expect(html).toBe('<pre>some text</pre>');
   });
 
-  it('wraps each top-level <table>/<pre> independently when several appear in one chapter', async () => {
+  it('never produces a scroll-x class', async () => {
     const html = await sanitizedChapter(
-      '<table><tbody><tr><td>one</td></tr></tbody></table><p>between</p><pre>two</pre>',
+      '<table><tbody><tr><td>one</td></tr></tbody></table><p>between</p><pre>two</pre><table><tbody><tr><td><table><tbody><tr><td>n</td></tr></tbody></table></td></tr></tbody></table>',
     );
-    expect(html.match(/<div class="scroll-x">/g)).toHaveLength(2);
-  });
-
-  it('wraps a nested table at both levels (outer and inner each get their own box)', async () => {
-    const html = await sanitizedChapter(
-      '<table><tbody><tr><td>outer<table><tbody><tr><td>inner</td></tr></tbody></table></td></tr></tbody></table>',
-    );
-    expect(html.match(/<div class="scroll-x">/g)).toHaveLength(2);
-    expect(html).toMatch(/<div class="scroll-x"><table>.*<div class="scroll-x"><table>/s);
-  });
-
-  it('does not wrap ordinary elements (p, h2, ul) - only table/pre get a scroll-x box', async () => {
-    const html = await sanitizedChapter('<h2>Title</h2><p>text</p><ul><li>item</li></ul>');
     expect(html).not.toContain('scroll-x');
+    expect(html).not.toContain('class=');
   });
 
-  it('preserves table content and attributes exactly when wrapping', async () => {
+  it('preserves table content and span attributes exactly', async () => {
     const html = await sanitizedChapter(
-      '<table><thead><tr><th>Name</th></tr></thead><tbody><tr><td colspan="2">Kaito</td></tr></tbody></table>',
+      '<table><thead><tr><th>Name</th></tr></thead><tbody><tr><td colspan="2" rowspan="3">Kaito</td></tr></tbody></table>',
     );
     expect(html).toContain('<th>Name</th>');
     expect(html).toContain('colspan="2"');
+    expect(html).toContain('rowspan="3"');
     expect(html).toContain('Kaito');
   });
+});
 
-  it('the scroll-x wrapper introduces no attribute beyond class (no id/style/data-* added)', async () => {
-    const html = await sanitizedChapter('<pre>x</pre>');
-    const wrapperTag = html.match(/<div[^>]*>/)?.[0] ?? '';
-    expect(wrapperTag).toBe('<div class="scroll-x">');
+describe('sanitizeChapterHtml - rigid publisher table geometry is dropped at the source', () => {
+  it.each([
+    ['table width', '<table width="800"><tbody><tr><td>x</td></tr></tbody></table>', 'width='],
+    ['table height', '<table height="400"><tbody><tr><td>x</td></tr></tbody></table>', 'height='],
+    ['cell width', '<table><tbody><tr><td width="300">x</td></tr></tbody></table>', 'width='],
+    ['th width', '<table><thead><tr><th width="25%">x</th></tr></thead></table>', 'width='],
+    ['col width', '<table><colgroup><col width="500"></colgroup><tbody><tr><td>x</td></tr></tbody></table>', 'width='],
+    ['row height', '<table><tbody><tr height="80"><td>x</td></tr></tbody></table>', 'height='],
+  ])('strips %s', async (_label, markup, attribute) => {
+    const html = await sanitizedChapter(markup);
+    expect(html).not.toContain(attribute);
+    expect(html).toContain('x');
+  });
+
+  it('keeps colspan/rowspan and the cell text while stripping widths in the same element', async () => {
+    const html = await sanitizedChapter('<table width="900"><tbody><tr><td colspan="2" width="400">kept</td></tr></tbody></table>');
+    expect(html).toContain('colspan="2"');
+    expect(html).toContain('kept');
+    expect(html).not.toContain('width');
+  });
+
+  it.each([
+    ['white-space: nowrap', 'white-space: nowrap'],
+    ['a fixed pixel width', 'width: 640px'],
+    ['a minimum width', 'min-width: 600px'],
+    ['a fixed font size', 'font-size: 11px'],
+    ['a white background', 'background-color: #ffffff'],
+    ['a black background', 'background: black'],
+    ['a text color', 'color: #000'],
+  ])('drops %s from inline styles on table cells (only layout-neutral styling survives)', async (_label, declaration) => {
+    const html = await sanitizedChapter(`<table><tbody><tr><td style="${declaration}; text-align: right">x</td></tr></tbody></table>`);
+    expect(html).not.toMatch(/white-space|width|font-size|background|color:/);
+    expect(html).toContain('text-align: right');
+  });
+
+  it('drops the legacy nowrap and bgcolor attributes', async () => {
+    const html = await sanitizedChapter('<table bgcolor="#ffffff"><tbody><tr><td nowrap bgcolor="white">x</td></tr></tbody></table>');
+    expect(html).not.toMatch(/nowrap|bgcolor/);
   });
 });
 

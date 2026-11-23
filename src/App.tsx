@@ -49,7 +49,7 @@ function App() {
     const backToLibrary = () => setScreen({ name: 'library' });
     return (
       <ReaderErrorBoundary onBack={backToLibrary}>
-        <ReaderScreen file={screen.file} onBack={backToLibrary} />
+        <ReaderScreen file={screen.file} onBack={backToLibrary} overlayCloseRef={sheetCloseRef} />
       </ReaderErrorBoundary>
     );
   }
