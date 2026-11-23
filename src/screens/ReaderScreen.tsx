@@ -41,6 +41,7 @@ import {
   type ReaderSettings,
   type ThemeName,
 } from '../lib/readerSettings';
+import { useSystemTheme } from '../lib/systemTheme';
 
 interface ReaderScreenProps {
   file: LibraryFile;
@@ -824,6 +825,8 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
     settings.theme === 'custom'
       ? { background: settings.customBackground, text: settings.customText }
       : THEME_COLORS[settings.theme];
+  // Page background + status/navigation bars follow the reading theme.
+  useSystemTheme(themeColors.background, themeColors.text);
 
   const contentStyle: CSSProperties = {
     fontFamily: FONT_FAMILY_STACKS[settings.fontFamily],
