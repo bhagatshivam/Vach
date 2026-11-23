@@ -79,9 +79,12 @@ function fakeTransport(file: Uint8Array) {
 
 const bytesRead = (reads: Array<{ length: number }>) => reads.reduce((n, r) => n + r.length, 0);
 
+// Each open book has its own blob: URLs, so two copies of the same book differ only in those.
+const sameUrls = (html: string) => html.replace(/blob:[^"#]+/g, 'blob:<url>');
+
 async function allChapters(book: Awaited<ReturnType<typeof openEpubFile>>): Promise<string[]> {
   const out: string[] = [];
-  for (let i = 0; i < book.chapterCount; i++) out.push(await book.loadChapter(i));
+  for (let i = 0; i < book.chapterCount; i++) out.push(sameUrls(await book.loadChapter(i)));
   return out;
 }
 
@@ -167,7 +170,7 @@ describe('openEpubFile - size threshold', () => {
     const a = await allChapters(small);
     const b = await allChapters(large);
     expect(b).toEqual(a);
-    expect(a[0]).toMatch(/<img[^>]*src="data:image\/png;base64,/); // images resolve the same way
+    expect(a[0]).toMatch(/<img[^>]*src="blob:<url>"/); // images resolve the same way
     expect(a[1]).not.toContain('<img');
   });
 
@@ -183,7 +186,7 @@ describe('openEpubFile - size threshold', () => {
     const events = async (wholeFileMaxBytes: number) => {
       const book = await openEpubFile('u', 'f.epub', { transport: fakeTransport(file).transport, wholeFileMaxBytes });
       const out: unknown[] = [];
-      for await (const e of book.stream(2)) out.push(e);
+      for await (const e of book.stream(2)) out.push(e.type === 'chapter' ? { ...e, html: sameUrls(e.html) } : e);
       return out;
     };
     const small = await events(EPUB_WHOLE_FILE_MAX_BYTES);

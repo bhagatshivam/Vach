@@ -1,5 +1,6 @@
 import { memo, useContext, useEffect, useRef } from 'react';
 import { chapterRenderProbe } from '../lib/chapterRenderProbe';
+import { ImageContext } from './imageContext';
 import { TableAdaptContext } from './tableAdaptContext';
 
 interface ChapterSectionProps {
@@ -15,18 +16,22 @@ interface ChapterSectionProps {
  */
 export const ChapterSection = memo(function ChapterSection({ index, html }: ChapterSectionProps) {
   chapterRenderProbe.onRender?.(index);
-  const controller = useContext(TableAdaptContext);
+  const tables = useContext(TableAdaptContext);
+  const images = useContext(ImageContext);
   const sectionRef = useRef<HTMLElement>(null);
 
-  // Once this chapter's HTML is in the DOM, hand it to the table adapter. The
-  // adapter measures it when it is near the viewport and ignores chapters
-  // without tables. (Registering is an effect on the DOM node, not a render:
-  // a chapter still renders exactly once.)
+  // Once this chapter's HTML is in the DOM, hand it to the table adapter and
+  // the image controller. Each measures/processes only what is near the
+  // viewport and ignores chapters with nothing for it. (Registering is an
+  // effect on the DOM node, not a render: a chapter still renders exactly once.)
   useEffect(() => {
     const section = sectionRef.current;
-    if (!controller || !section) return;
-    return controller.register(section);
-  }, [controller]);
+    if (!section) return;
+    const stops = [tables?.register(section), images?.register(section)];
+    return () => {
+      for (const stop of stops) stop?.();
+    };
+  }, [tables, images]);
 
   return <section ref={sectionRef} className="chapter" dangerouslySetInnerHTML={{ __html: html }} />;
 });
