@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type RefObject } from 'react';
 import { App as CapacitorApp } from '@capacitor/app';
 import type { LibraryFile } from '../lib/libraryFolder';
 import { FileTooLargeError, createFileSource } from '../lib/fileBridge';
 import type { EpubBook } from '../lib/epub';
 import { ChapterList } from '../components/ChapterList';
-import ImageLightbox, { DomNode } from '../components/ImageLightbox';
+import ImageLightbox, { type LightboxImage } from '../components/ImageLightbox';
+import { ImageContext } from '../components/imageContext';
+import { ImageController } from '../lib/imageController';
+import type { FullImage } from '../lib/imageProcessor';
 import { TableAdaptContext } from '../components/tableAdaptContext';
 import { TableAdaptController, cloneForGrid, watchWidth } from '../lib/tableAdapter';
 import { anchorScrollTarget, needsScroll, preserveAnchorDuring, settingsAffectLayout } from '../lib/reanchor';
@@ -29,6 +32,7 @@ import {
 import { anchorForRestore, loadPosition, markOpened, savePosition, type StoredPosition } from '../lib/readingPosition';
 import {
   DEFAULT_READER_SETTINGS,
+  isDarkTheme,
   FONT_FAMILY_OPTIONS,
   FONT_FAMILY_STACKS,
   FONT_SIZE_MAX,
@@ -191,7 +195,15 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
   // --- Tables ---
   const [tableController, setTableController] = useState<TableAdaptController | null>(null);
   const preserveViewRef = useRef<(work: () => void) => void>((work) => work());
-  const [expandedTable, setExpandedTable] = useState<HTMLTableElement | null>(null);
+  // --- Images and the lightbox ---
+  const [imageController, setImageController] = useState<ImageController | null>(null);
+  // What the full-screen overlay is showing, if anything: an Expand Grid copy of a
+  // table, or a picture the reader tapped (with how to decode it at full detail).
+  const [lightbox, setLightbox] = useState<
+    | { kind: 'table'; node: HTMLTableElement }
+    | { kind: 'image'; image: LightboxImage; loadFull: () => Promise<FullImage | null> }
+    | null
+  >(null);
   // Kept alive for loading earlier chapters on demand; null for a PDF.
   const epubRef = useRef<EpubBook | null>(null);
   const loadingPreviousRef = useRef(false);
@@ -217,6 +229,7 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
     let cancelled = false;
     let generator: AsyncGenerator<ParseEvent> | null = null;
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    let imageControllerLocal: ImageController | null = null;
     // Stops in-flight chunked reads (and range requests, via the PDF handle)
     // when the user backs out mid-open, instead of reading on for nobody.
     const abortController = new AbortController();
@@ -229,6 +242,8 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
     anchorRef.current = null;
     progressFractionRef.current = 0;
     epubRef.current = null;
+    setImageController(null);
+    setLightbox(null);
     loadingPreviousRef.current = false;
     prependAnchorRef.current = null;
     pageKindWindowRef.current = [];
@@ -272,6 +287,12 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
 
         pdfHandleRef.current = opened.pdfHandle;
         epubRef.current = opened.epub;
+        if (opened.epub) {
+          // Pictures near the screen are downscaled in the background; this
+          // book's blob: URLs are revoked when it closes (see the cleanup).
+          imageControllerLocal = new ImageController(opened.epub.images);
+          setImageController(imageControllerLocal);
+        }
         // An EPUB opened at a saved position starts at that chapter (plus
         // the one before it), not at chapter 0. Saved anchors are chapter-
         // relative, so they are valid as-is - nothing before the saved
@@ -367,6 +388,9 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
     return () => {
       cancelled = true;
       if (flushTimer !== null) clearTimeout(flushTimer);
+      imageControllerLocal?.destroy();
+      // The book is closing: every blob: URL it made is revoked.
+      epubRef.current?.close();
       epubRef.current = null;
       abortController.abort();
       // Signals the generator to stop at its next suspension point instead
@@ -667,7 +691,7 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
   useEffect(() => {
     const controller = new TableAdaptController({
       preserveView: (work) => preserveViewRef.current(work),
-      onExpand: (table) => setExpandedTable(cloneForGrid(table)),
+      onExpand: (table) => setLightbox({ kind: 'table', node: cloneForGrid(table) }),
     });
     setTableController(controller);
     return () => {
@@ -708,14 +732,15 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
   }, [contentRevealed, cacheAnchor]);
 
   // Hardware Back closes the expanded table first.
-  const closeExpandedTable = useCallback(() => setExpandedTable(null), []);
+  const closeLightbox = useCallback(() => setLightbox(null), []);
+  const lightboxOpen = lightbox !== null;
   useEffect(() => {
-    if (!expandedTable || !overlayCloseRef) return;
-    overlayCloseRef.current = closeExpandedTable;
+    if (!lightboxOpen || !overlayCloseRef) return;
+    overlayCloseRef.current = closeLightbox;
     return () => {
-      if (overlayCloseRef.current === closeExpandedTable) overlayCloseRef.current = null;
+      if (overlayCloseRef.current === closeLightbox) overlayCloseRef.current = null;
     };
-  }, [expandedTable, overlayCloseRef, closeExpandedTable]);
+  }, [lightboxOpen, overlayCloseRef, closeLightbox]);
 
   // Debounced save while actively reading. Deliberately a separate,
   // independent effect from the nav auto-hide timer below - it must never
@@ -793,12 +818,35 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
   // in the first place. A tap while the settings panel is open dismisses the
   // panel first, matching "tap outside to dismiss"; only a subsequent tap
   // toggles the nav bar itself.
-  function handleContentTap() {
+  function handleContentTap(event: ReactMouseEvent<HTMLDivElement>) {
     if (showSettings) {
       setShowSettings(false);
       return;
     }
+    // A tap on a picture in the book opens it full screen instead of toggling the header.
+    if (event.target instanceof HTMLImageElement && openImageInLightbox(event.target)) return;
     setNavVisible((visible) => !visible);
+  }
+
+  // Pictures smaller than this on both sides are decoration (a flourish, an icon): tapping one is
+  // just a tap on the page.
+  const MIN_OPENABLE_SIDE_PX = 64;
+
+  function openImageInLightbox(img: HTMLImageElement): boolean {
+    const store = epubRef.current?.images;
+    const src = img.getAttribute('src');
+    const info = store && src ? store.describe(src) : null;
+    if (!store || !src || !info?.width || !info.height) return false; // not one of the book's pictures (or its size is unknown)
+    if (img.style.display === 'inline-block') return false; // sits inside a line of text
+    if (info.width < MIN_OPENABLE_SIDE_PX && info.height < MIN_OPENABLE_SIDE_PX) return false;
+
+    setLightbox({
+      kind: 'image',
+      // Until the full-detail copy is ready, the picture as it is in the page (if it has been downscaled yet).
+      image: { src: store.isPending(src) ? undefined : src, width: info.width, height: info.height, alt: img.alt },
+      loadFull: () => store.full(src),
+    });
+    return true;
   }
 
   function toggleSettings() {
@@ -978,20 +1026,30 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
           onClick={handleContentTap}
         >
           <TableAdaptContext.Provider value={tableController}>
-            <ChapterList firstChapterIndex={book.firstChapterIndex} chaptersHtml={book.chaptersHtml} />
+            <ImageContext.Provider value={imageController}>
+              <ChapterList firstChapterIndex={book.firstChapterIndex} chaptersHtml={book.chaptersHtml} />
+            </ImageContext.Provider>
           </TableAdaptContext.Provider>
           {!book.isComplete && <p className="loading-more">Loading more…</p>}
         </div>
       )}
 
-      {expandedTable && (
+      {lightbox?.kind === 'table' && (
         <ImageLightbox
           label="Table"
-          onClose={closeExpandedTable}
+          onClose={closeLightbox}
+          node={lightbox.node}
           contentStyle={{ ...contentStyle, background: themeColors.background, color: themeColors.text }}
-        >
-          <DomNode node={expandedTable} />
-        </ImageLightbox>
+        />
+      )}
+      {lightbox?.kind === 'image' && (
+        <ImageLightbox
+          label={lightbox.image.alt || 'Image'}
+          onClose={closeLightbox}
+          image={lightbox.image}
+          loadFull={lightbox.loadFull}
+          canInvert={isDarkTheme(settings)}
+        />
       )}
     </div>
   );

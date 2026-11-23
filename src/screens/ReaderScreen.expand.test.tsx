@@ -17,8 +17,12 @@ vi.mock('@capacitor/app', () => ({
 const WIDE_HEADERLESS = `<table><tbody><tr>${Array.from({ length: 9 }, (_, i) => `<td>cell${i}</td>`).join('')}</tr><tr>${Array.from({ length: 9 }, (_, i) => `<td>more${i}</td>`).join('')}</tr></tbody></table>`;
 const WIDE_HEADED = `<table><thead><tr>${Array.from({ length: 9 }, (_, i) => `<th>Col${i}</th>`).join('')}</tr></thead><tbody><tr>${Array.from({ length: 9 }, (_, i) => `<td>v${i}</td>`).join('')}</tr></tbody></table>`;
 
-vi.mock('../lib/epubFile', () => ({
+vi.mock('../lib/epubFile', async () => {
+  const { ImageStore } = await import('../lib/imageProcessor');
+  return {
   openEpubFile: async () => ({
+    images: new ImageStore(),
+    close() {},
     title: 'Tables',
     chapterCount: 1,
     loadChapter: async () => '',
@@ -28,7 +32,8 @@ vi.mock('../lib/epubFile', () => ({
       yield { type: 'chapter', html: `<p>intro</p>${WIDE_HEADERLESS}<p>middle</p>${WIDE_HEADED}<p>end</p>` };
     },
   }),
-}));
+  };
+});
 
 const file: LibraryFile = { name: 'tables.epub', uri: 'content://x/tables.epub', path: 'tables.epub', size: 1234 };
 const originalRect = Element.prototype.getBoundingClientRect;

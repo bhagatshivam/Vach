@@ -7,6 +7,7 @@ import JSZip from 'jszip';
 import { archiveFromJSZip, openEpub } from '../../src/lib/epub';
 import { anchorScrollTarget, needsScroll, preserveAnchorDuring } from '../../src/lib/reanchor';
 import { computeAnchor, flattenToLeafBlocks } from '../../src/lib/readerAnchor';
+import { lightboxIsOpen, mountLightbox, sleep, unmountLightbox, view, drag, pinchGesture, stage } from './lightboxDriver';
 import { TableAdaptController, cloneForGrid, topLevelTables, currentMode } from '../../src/lib/tableAdapter';
 
 const toBytes = (base64: string): Uint8Array => Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
@@ -67,13 +68,9 @@ const api: Record<string, any> = {
     controller = new TableAdaptController({
       // The same view-keeping the reader uses for passes triggered by scrolling.
       preserveView: (work) => preserveAnchorDuring(chapters, work),
+      // The real lightbox (the same component the reader uses), showing a copy of the table.
       onExpand: (table) => {
-        const clone = cloneForGrid(table);
-        const box = document.createElement('div');
-        box.className = 'lightbox';
-        box.innerHTML = '<div class="lightbox-content"><div class="lightbox-dom"></div></div>';
-        box.querySelector('.lightbox-dom')!.append(clone);
-        document.body.append(box);
+        void mountLightbox({ label: 'Table', node: cloneForGrid(table) });
       },
     });
     if (adapt) for (const section of chapters()) controller.register(section);
@@ -127,25 +124,40 @@ const api: Record<string, any> = {
     return () => bad.remove();
   },
 
-  /** Click the first Expand Grid button; report how the opened grid behaves. */
-  openGrid() {
+  /** Click the first Expand Grid button; report how the opened grid behaves in the real lightbox. */
+  async openGrid() {
     const button = content!.querySelector<HTMLButtonElement>('.vach-table-expand');
     if (!button) return null;
     button.click();
-    const panel = document.querySelector<HTMLElement>('.lightbox-content')!;
-    const table = panel.querySelector('table')!;
+    await sleep(120);
+    const table = document.querySelector<HTMLElement>('.lightbox-content table') as HTMLTableElement | null;
+    if (!table) return null;
+    const opened = view();
+    const vw = opened.viewport.width;
+    const vh = opened.viewport.height;
+    // A wide table opens at its own size: wider than the screen, so it can be panned and pinched.
+    await drag([vw * 0.8, vh / 2], [vw * 0.2, vh / 2]);
+    const panned = view();
+    await pinchGesture(vw / 2, vh / 2, 60, 180);
+    const zoomed = view();
     return {
-      scrollsSideways: panel.scrollWidth > panel.clientWidth,
-      scrollsVertically: panel.scrollHeight >= panel.clientHeight,
+      widerThanScreen: opened.rect.width > vw + 1,
+      startsAtLeftEdge: Math.abs(opened.rect.left) <= 1,
+      panMoves: Math.abs(panned.x - opened.x) > 20,
+      panClamped: panned.rect.right >= vw - 0.5,
+      pinchZooms: zoomed.scale > opened.scale * 1.5,
       tableClasses: table.className,
       hasLabels: table.querySelector('[data-label]') !== null,
       columns: table.rows[0].cells.length,
+      open: lightboxIsOpen(),
     };
   },
 
   closeGrid() {
-    document.querySelector('.lightbox')?.remove();
+    unmountLightbox();
   },
+
+  stageExists: () => Boolean(stage()),
 
   /** Scroll to a paragraph, change the layout, restore from the captured anchor: is the same text at the top? */
   async reanchorCheck(chapterIndex: number, newFontSizePx: number) {

@@ -717,9 +717,38 @@
   cursor: pointer;
 }
 
-.reader-content img {
+/* ---- Pictures -------------------------------------------------------------
+   Each <img> arrives with its real size already on it (width/height and an
+   aspect-ratio, stamped from the file's header - see stampImage in epub.ts), so
+   the box is the right size before any pixels load and nothing around it moves.
+   The explicit inline width is what sizes the box; `width: auto` below is only
+   the fallback for an image whose size could not be read. PDF page images
+   (.pdf-page-img) have their own rules further down and are left out here. */
+.reader-content img:not(.pdf-page-img) {
+  max-width: 100%;
+  width: auto;
+  height: auto;
+  max-height: 82svh;
+  object-fit: contain;
+  display: block;
+  margin: 1.25em auto;
+}
+
+.reader-content svg {
   max-width: 100%;
   height: auto;
+}
+
+/* Not yet downscaled: shows the shared 1x1 placeholder (its src ends in
+   #vach-<id>); a faint tint says "a picture goes here" until it is swapped. */
+.reader-content img[src*='#vach-'] {
+  background: rgba(128, 128, 128, 0.1);
+}
+
+/* Night theme: dim bright pictures so a white page of line art or a pale photo
+   is not a flash of light in a dark room. */
+.reader[data-theme='night'] .reader-content img:not(.pdf-page-img) {
+  filter: brightness(0.84) contrast(1.04);
 }
 
 /* Long unbroken runs (a URL, a run-on string with no spaces) break instead of
@@ -940,47 +969,113 @@
   cursor: pointer;
 }
 
-/* ---- Expand Grid overlay (components/ImageLightbox.tsx) ------------------ */
+/* ---- Lightbox (components/ImageLightbox.tsx): pictures and Expand Grid ------
+   Everything is positioned by one transform on .lightbox-content, driven by
+   Pointer Events (pinch, drag, double-tap, swipe down) - the page underneath is
+   not scrolled, and the browser's own touch handling is switched off on the stage. */
 .lightbox {
   position: fixed;
   inset: 0;
   z-index: 20;
-  display: flex;
-  align-items: stretch;
-  justify-content: center;
-  padding: 56px 12px 12px;
-  background: rgba(0, 0, 0, 0.85);
+  overflow: hidden;
+  overscroll-behavior: contain;
 }
 
-.lightbox-close {
+.lightbox-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.92);
+}
+
+.lightbox-stage {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.lightbox-content {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.lightbox-content.settling {
+  transition: transform 160ms ease-out;
+}
+
+.lightbox-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+
+.lightbox-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 14px;
+  pointer-events: none;
+}
+
+.lightbox-toolbar {
   position: absolute;
   top: 8px;
   right: 8px;
-  width: 44px;
+  left: 8px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.lightbox-close,
+.lightbox-invert {
+  pointer-events: auto;
   height: 44px;
+  min-width: 44px;
   border: 0;
   border-radius: 22px;
-  background: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.16);
   color: #fff;
-  font-size: 28px;
-  line-height: 1;
   cursor: pointer;
 }
 
-/* The panel scrolls in both directions: the one place sideways movement is
-   allowed, because the reader asked for the whole grid. */
-.lightbox-content {
-  flex: 1;
-  min-width: 0;
-  overflow: auto;
-  border-radius: 8px;
+.lightbox-close {
+  font-size: 28px;
+  line-height: 1;
+}
+
+.lightbox-invert {
+  padding: 0 16px;
+  font-size: 14px;
+}
+
+.lightbox-invert[aria-pressed='true'] {
+  background: rgba(255, 255, 255, 0.85);
+  color: #111;
+}
+
+/* An Expand Grid table: natural width, on a sheet in the reader's own colors
+   (set inline), moved and zoomed like a picture. */
+.lightbox-dom {
+  width: max-content;
   padding: 12px;
-  overscroll-behavior: contain;
+  border-radius: 8px;
 }
 
 .lightbox-dom table {
   width: max-content;
-  min-width: 100%;
   border-collapse: collapse;
   font-size: 0.95em;
 }

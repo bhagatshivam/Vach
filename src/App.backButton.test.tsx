@@ -60,8 +60,12 @@ vi.mock('./lib/libraryFolder', () => ({
 // parsing) purely so opening a book resolves quickly and deterministically,
 // with no saved position so content reveals immediately and the
 // appStateChange listener registers right away.
-vi.mock('./lib/epubFile', () => ({
+vi.mock('./lib/epubFile', async () => {
+  const { ImageStore } = await import('./lib/imageProcessor');
+  return {
   openEpubFile: async () => ({
+    images: new ImageStore(),
+    close() {},
     title: 'Test Book',
     chapterCount: 1,
     loadChapter: async () => '<p>one paragraph</p>',
@@ -71,7 +75,8 @@ vi.mock('./lib/epubFile', () => ({
       yield { type: 'chapter', html: '<p>one paragraph</p>' };
     },
   }),
-}));
+  };
+});
 
 afterEach(() => {
   cleanup();
