@@ -10,3 +10,10 @@
   top: calc(8px + var(--sat));
   right: calc(8px + var(--sar));
 }
+
+/* The image lightbox's toolbar (Close / Invert) in the same way, once that component is in. */
+.lightbox-toolbar {
+  top: calc(8px + var(--sat));
+  right: calc(8px + var(--sar));
+  left: calc(8px + var(--sal));
+}
