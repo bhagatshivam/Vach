@@ -1,6 +1,9 @@
 import JSZip from 'jszip';
 import DOMPurify from 'dompurify';
 import { ImageStore, isOwnBlobUrl, type RegisteredImage } from './imageProcessor';
+import { dirOf, resolveRelativePath } from './epubPath';
+import { loadEpubToc } from './epubToc';
+import { ANCHOR_ATTR, type TocItem } from './toc';
 
 export type ParseEvent =
   | { type: 'title'; title: string }
@@ -96,40 +99,6 @@ function findByLocalName(doc: Document, name: string): Element[] {
   return Array.from(doc.getElementsByTagName('*')).filter((el) => localName(el) === name);
 }
 
-/**
- * Resolves a zip-relative href (as found in an OPF manifest item or a
- * chapter's own <img src>) against the directory of the file that
- * referenced it. Handles "../" and "./" segments and a small amount of
- * real-world sloppiness (fragments/queries on hrefs, leading "/").
- */
-function resolveRelativePath(baseDir: string, relativeHref: string): string {
-  const clean = relativeHref.split('#')[0].split('?')[0];
-
-  if (clean.startsWith('/')) {
-    return clean
-      .slice(1)
-      .split('/')
-      .filter(Boolean)
-      .map(decodeURIComponent)
-      .join('/');
-  }
-
-  const baseParts = baseDir ? baseDir.split('/').filter(Boolean) : [];
-  const relParts = clean.split('/').filter((p) => p.length > 0 && p !== '.');
-
-  const stack = [...baseParts];
-  for (const part of relParts) {
-    if (part === '..') stack.pop();
-    else stack.push(part);
-  }
-  return stack.map(decodeURIComponent).join('/');
-}
-
-function dirOf(path: string): string {
-  const idx = path.lastIndexOf('/');
-  return idx === -1 ? '' : path.slice(0, idx);
-}
-
 function findOpfPath(containerXml: string): string {
   const doc = new DOMParser().parseFromString(containerXml, 'application/xml');
   if (doc.querySelector('parsererror')) {
@@ -147,9 +116,23 @@ function findOpfPath(containerXml: string): string {
 interface ManifestItem {
   href: string;
   mediaType: string;
+  /** The item's `properties` attribute (EPUB 3), e.g. "nav" or "cover-image". */
+  properties: string;
 }
 
-function parseOpf(opfXml: string, opfDir: string): { manifest: Map<string, ManifestItem>; spineHrefs: string[] } {
+interface ParsedOpf {
+  manifest: Map<string, ManifestItem>;
+  /** The reading order: spine items that are linear. */
+  spineHrefs: string[];
+  /** Every spine item, in order, linear or not. */
+  fullSpineHrefs: string[];
+  /** The EPUB 3 navigation document, if declared. */
+  navHref: string | null;
+  /** The EPUB 2 NCX, if declared. */
+  ncxHref: string | null;
+}
+
+function parseOpf(opfXml: string, opfDir: string): ParsedOpf {
   const doc = new DOMParser().parseFromString(opfXml, 'application/xml');
   if (doc.querySelector('parsererror')) {
     throw new Error('Invalid EPUB: OPF file is not valid XML');
@@ -163,20 +146,37 @@ function parseOpf(opfXml: string, opfDir: string): { manifest: Map<string, Manif
     manifest.set(id, {
       href: resolveRelativePath(opfDir, href),
       mediaType: el.getAttribute('media-type') ?? '',
+      properties: el.getAttribute('properties') ?? '',
     });
   }
 
   // Non-linear spine items (EPUB3 footnote/pop-up content not meant for the
   // main reading order) are deliberately excluded from continuous scroll.
   const spineHrefs: string[] = [];
+  const fullSpineHrefs: string[] = [];
   for (const el of findByLocalName(doc, 'itemref')) {
-    if (el.getAttribute('linear') === 'no') continue;
     const idref = el.getAttribute('idref');
     const item = idref ? manifest.get(idref) : undefined;
-    if (item) spineHrefs.push(item.href);
+    if (!item) continue;
+    fullSpineHrefs.push(item.href);
+    if (el.getAttribute('linear') === 'no') continue;
+    spineHrefs.push(item.href);
   }
 
-  return { manifest, spineHrefs };
+  // The table-of-contents documents: EPUB 3 marks its nav with properties="nav";
+  // EPUB 2 names the NCX in <spine toc="id"> (or just gives it its own media type).
+  let navHref: string | null = null;
+  let ncxHref: string | null = null;
+  for (const item of manifest.values()) {
+    if (navHref === null && item.properties.split(/\s+/).includes('nav')) navHref = item.href;
+    if (ncxHref === null && item.mediaType === 'application/x-dtbncx+xml') ncxHref = item.href;
+  }
+  const spineEl = findByLocalName(doc, 'spine')[0];
+  const tocId = spineEl?.getAttribute('toc');
+  const declaredNcx = tocId ? manifest.get(tocId) : undefined;
+  if (declaredNcx) ncxHref = declaredNcx.href;
+
+  return { manifest, spineHrefs, fullSpineHrefs, navHref, ncxHref };
 }
 
 function extractTitle(opfXml: string): string | null {
@@ -263,7 +263,7 @@ const ALLOWED_TAGS = [
 // vector for CSS-based tricks if that ever changes. style is kept but its
 // *value* is independently re-validated below - this list only controls
 // which attribute names can exist at all.
-const ALLOWED_ATTR = ['alt', 'src', 'width', 'height', 'colspan', 'rowspan', 'lang', 'dir', 'style', 'loading', 'decoding'];
+const ALLOWED_ATTR = ['alt', 'src', 'width', 'height', 'colspan', 'rowspan', 'lang', 'dir', 'style', 'loading', 'decoding', 'data-vach-anchor'];
 
 // Inline style: a short allowlist of structural properties only - nothing
 // that can paint, fetch, or navigate. Each property additionally has its
@@ -397,7 +397,7 @@ const DOMPURIFY_CONFIG = {
   // via a regression test that actually asserted colspan survived a real
   // sanitize() round trip. src is deliberately not in this list: it's the one
   // attribute that must keep going through the regexp check (and the hook).
-  ADD_URI_SAFE_ATTR: ['width', 'height', 'colspan', 'rowspan', 'lang', 'dir', 'loading', 'decoding'],
+  ADD_URI_SAFE_ATTR: ['width', 'height', 'colspan', 'rowspan', 'lang', 'dir', 'loading', 'decoding', 'data-vach-anchor'],
   ALLOW_DATA_ATTR: false,
   // Explicit on top of the allowlist default-deny, so the intent reads
   // clearly even though these are already absent from ALLOWED_TAGS: no
@@ -547,6 +547,42 @@ async function resolveImgSrcs(
  * <style> tags) is discarded entirely by only reading .body - and <style>/
  * <link> are forbidden outright by DOMPurify too, as defense in depth.
  */
+// Where a table-of-contents entry points inside a chapter ("ch1.xhtml#part2"),
+// so the reader can scroll there. A book's own ids (and <a name>) are NOT
+// allowed through - they could clobber the page's own names - so each is kept
+// as the inert data attribute ANCHOR_ATTR (toc.ts) instead, which nothing reads except the jump.
+const MAX_ANCHOR_LENGTH = 200;
+const ALLOWED_TAG_SET = new Set(ALLOWED_TAGS.map((tag) => tag.toUpperCase()));
+
+/**
+ * Moves every id / <a name> onto ANCHOR_ATTR on an element that will survive
+ * sanitizing. It only ever changes an attribute, never the tree, so the
+ * chapter's block structure - which saved reading positions are counted in -
+ * is exactly what it was. An anchor on an element the allowlist drops (the
+ * usual empty <a id="x"></a> inside a heading) is handed to the nearest
+ * surviving ancestor, or at the top level to the next element.
+ */
+function keepAnchors(doc: Document): void {
+  const body = doc.body;
+  if (!body) return;
+  for (const el of Array.from(body.querySelectorAll('[id], a[name]'))) {
+    const value = el.getAttribute('id') ?? el.getAttribute('name') ?? '';
+    el.removeAttribute('id');
+    if (!value || value.length > MAX_ANCHOR_LENGTH) continue;
+
+    let holder: Element | null = el;
+    if (!ALLOWED_TAG_SET.has(el.tagName)) {
+      holder = el.parentElement;
+      while (holder && holder !== body && !ALLOWED_TAG_SET.has(holder.tagName)) holder = holder.parentElement;
+      if (holder === body || !holder) {
+        holder = el.nextElementSibling;
+        while (holder && !ALLOWED_TAG_SET.has(holder.tagName)) holder = holder.nextElementSibling;
+      }
+    }
+    if (holder && !holder.hasAttribute(ANCHOR_ATTR)) holder.setAttribute(ANCHOR_ATTR, value);
+  }
+}
+
 async function sanitizeChapterHtml(
   rawHtml: string,
   chapterDir: string,
@@ -557,6 +593,7 @@ async function sanitizeChapterHtml(
 
   await convertSvgImagesToImg(doc, chapterDir, resolveImage);
   await resolveImgSrcs(doc, chapterDir, resolveImage, registerInline);
+  keepAnchors(doc);
 
   return sanitizePlainFragment(doc.body?.innerHTML ?? '');
 }
@@ -599,11 +636,22 @@ export interface EpubArchive {
   has(path: string): boolean;
   /** Reads one entry's decompressed bytes; rejects if missing or over `maxBytes` of real output. */
   read(path: string, maxBytes: number): Promise<Uint8Array>;
+  /**
+   * An entry's uncompressed size as recorded in the ZIP's central directory,
+   * without reading it; undefined if unknown. Used to weight reading progress.
+   */
+  sizeOf?(path: string): number | undefined;
 }
 
 export function archiveFromJSZip(zip: JSZip): EpubArchive {
   return {
     has: (path) => zip.file(path) !== null,
+    // jszip keeps each entry's central-directory size in a private field; if a
+    // future version moves it, sizes read as unknown and progress counts chapters equally.
+    sizeOf: (path) => {
+      const size = (zip.file(path) as unknown as { _data?: { uncompressedSize?: unknown } } | null)?._data?.uncompressedSize;
+      return typeof size === 'number' && Number.isFinite(size) && size >= 0 ? size : undefined;
+    },
     read: (path, maxBytes) => {
       const entry = zip.file(path);
       if (!entry) return Promise.reject(new Error(`Entry "${path}" not found in the archive`));
@@ -631,6 +679,18 @@ export interface EpubBook {
   loadChapter(index: number): Promise<string>;
   /** Title and total, then chapters `startIndex`..end in order. */
   stream(startIndex?: number): AsyncGenerator<ParseEvent>;
+  /**
+   * The table of contents, mapped onto chapter indexes. Reads only the book's
+   * navigation file (once, then cached), never a chapter. A book with no
+   * usable TOC gets one "Section N" entry per chapter.
+   */
+  toc(): Promise<TocItem[]>;
+  /**
+   * Each chapter's uncompressed size in bytes, from the ZIP index (no parsing),
+   * by chapter index - what reading progress is weighted by. Null if the
+   * archive cannot say.
+   */
+  chapterWeights: readonly number[] | null;
   /** The book's images: sizes, background downscaling, full-detail decoding for the lightbox. */
   images: ImageStore;
   /** Releases everything the book holds (every blob: URL). Call when the book closes. */
@@ -654,7 +714,7 @@ export async function openEpub(archive: EpubArchive, fallbackTitle: string): Pro
   const opfXml = decoder.decode(await archive.read(opfPath, MAX_CHAPTER_UNCOMPRESSED_BYTES));
   const opfDir = dirOf(opfPath);
 
-  const { manifest, spineHrefs } = parseOpf(opfXml, opfDir);
+  const { manifest, spineHrefs, fullSpineHrefs, navHref, ncxHref } = parseOpf(opfXml, opfDir);
   const title = extractTitle(opfXml) || fallbackTitle;
 
   // Known up front, from the spine and the archive's own index: a progress
@@ -664,6 +724,14 @@ export async function openEpub(archive: EpubArchive, fallbackTitle: string): Pro
   if (chapterHrefs.length === 0) {
     throw new Error('No readable chapters found in this EPUB');
   }
+
+  // Sizes straight from the ZIP index - nothing is read or parsed for them.
+  const sizes = archive.sizeOf ? chapterHrefs.map((href) => archive.sizeOf!(href)) : null;
+  const chapterWeights = sizes && sizes.every((size): size is number => size !== undefined) ? sizes : null;
+
+  let tocPromise: Promise<TocItem[]> | null = null;
+  const toc = () =>
+    (tocPromise ??= loadEpubToc({ archive, navPath: navHref, ncxPath: ncxHref, chapterPaths: chapterHrefs, fullSpinePaths: fullSpineHrefs }));
 
   const manifestByHref = new Map<string, ManifestItem>();
   for (const item of manifest.values()) {
@@ -722,6 +790,8 @@ export async function openEpub(archive: EpubArchive, fallbackTitle: string): Pro
     title,
     chapterCount: chapterHrefs.length,
     loadChapter,
+    toc,
+    chapterWeights,
     images,
     close: () => images.revokeAll(),
     async *stream(startIndex = 0) {

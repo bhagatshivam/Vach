@@ -19,6 +19,7 @@ import pdfWorkerUrl from './pdfWorkerEntry.ts?worker&url';
 import { sanitizePlainTextOnly } from './epub';
 import { detectPdfCompatGaps, installPdfCompatPolyfills } from './pdfCompatPolyfills';
 import type { FileSource } from './fileBridge';
+import type { TocItem } from './toc';
 import { BridgeRangeTransport, PDF_INITIAL_BYTES, PDF_RANGE_CHUNK_BYTES } from './pdfRangeTransport';
 
 // Logged once, main thread only - the worker's own copy of this check logs
@@ -532,6 +533,12 @@ function renderPageImageImpl(
 export interface PdfHandle {
   streamChapters(): AsyncGenerator<ParseEvent>;
   /**
+   * The document's outline (bookmarks) as a table of contents whose
+   * `chapterIndex` is the page index (0-based; the reader's chapter k is page
+   * k + 1). Empty when the PDF has none. Never rejects.
+   */
+  getOutline(): Promise<TocItem[]>;
+  /**
    * Rasterizes one page on demand. viewportWidthPx/devicePixelRatio are
    * passed in (rather than read from `window` here) purely for
    * testability; production callers pass the real live values at the
@@ -561,6 +568,68 @@ async function* surfaceBridgeErrors(
     yield event;
   }
   if (transport.fatalError) throw transport.fatalError;
+}
+
+// ---------------------------------------------------------------------------
+// Outline (bookmarks) -> table of contents
+// ---------------------------------------------------------------------------
+
+/** The part of a pdf.js outline node this needs (pdf.js's own type has more). */
+export interface PdfOutlineNode {
+  title?: string;
+  /** A named destination, an explicit destination array, or null (a URL or action only). */
+  dest?: string | readonly unknown[] | null;
+  items?: readonly PdfOutlineNode[];
+}
+
+/** The two document lookups that turn a destination into a page. */
+export interface PdfDestinationResolver {
+  getDestination(name: string): Promise<readonly unknown[] | null>;
+  getPageIndex(pageRef: unknown): Promise<number>;
+}
+
+async function pageIndexOf(dest: PdfOutlineNode['dest'], resolver: PdfDestinationResolver, pageCount: number): Promise<number | null> {
+  try {
+    const explicit = typeof dest === 'string' ? await resolver.getDestination(dest) : (dest ?? null);
+    const target = explicit?.[0];
+    if (target === undefined || target === null) return null;
+    // An explicit destination names its page by reference (a {num, gen} object), or, in rare files, by index.
+    const index = typeof target === 'number' ? target : await resolver.getPageIndex(target);
+    return Number.isInteger(index) && index >= 0 && index < pageCount ? index : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolves a PDF outline into TocItems. Entries whose destination cannot be
+ * resolved to a page of this document (a web link, a broken reference) are
+ * dropped, unless they have entries beneath them, in which case they open the
+ * first of those. A missing title becomes "Page N".
+ */
+export async function resolvePdfOutline(nodes: readonly PdfOutlineNode[] | null | undefined, resolver: PdfDestinationResolver, pageCount: number): Promise<TocItem[]> {
+  let counter = 0;
+  async function build(list: readonly PdfOutlineNode[], depth: number): Promise<TocItem[]> {
+    const out: TocItem[] = [];
+    for (const node of list) {
+      const own = await pageIndexOf(node.dest, resolver, pageCount);
+      const children = await build(node.items ?? [], depth + 1);
+      const chapterIndex = own ?? children[0]?.chapterIndex;
+      if (chapterIndex === undefined) continue;
+      const title = (node.title ?? '').replace(/\s+/g, ' ').trim() || `Page ${chapterIndex + 1}`;
+      out.push({ id: '', title, chapterIndex, depth, children });
+    }
+    return out;
+  }
+  const items = await build(nodes ?? [], 0);
+  const number = (list: TocItem[]) => {
+    for (const item of list) {
+      item.id = `t${counter++}`;
+      number(item.children);
+    }
+  };
+  number(items);
+  return items;
 }
 
 /**
@@ -618,6 +687,23 @@ export async function openPdf(source: FileSource, fallbackTitle: string): Promis
   return {
     streamChapters() {
       return surfaceBridgeErrors(streamChaptersImpl(doc, fallbackTitle), transport);
+    },
+    async getOutline() {
+      try {
+        const outline = (await doc.getOutline()) as readonly PdfOutlineNode[] | null;
+        if (!outline || outline.length === 0) return [];
+        return await resolvePdfOutline(
+          outline,
+          {
+            getDestination: (name) => doc.getDestination(name),
+            getPageIndex: (ref) => doc.getPageIndex(ref as Parameters<PDFDocumentProxy['getPageIndex']>[0]),
+          },
+          doc.numPages,
+        );
+      } catch (err) {
+        console.error('[pdf] could not read the outline', err);
+        return [];
+      }
     },
     renderPageImage(pageNumber, viewportWidthPx, devicePixelRatio) {
       return renderPageImageImpl(doc, pageNumber, viewportWidthPx, devicePixelRatio);
