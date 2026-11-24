@@ -13,6 +13,7 @@ import { TableAdaptContext } from '../components/tableAdaptContext';
 import { TableAdaptController, cloneForGrid, watchWidth } from '../lib/tableAdapter';
 import { anchorScrollTarget, needsScroll, preserveAnchorDuring, settingsAffectLayout } from '../lib/reanchor';
 import {
+  canScrollWithinWindow,
   prependCompensation,
   restoreWindowStart,
   shouldLoadPrevious,
@@ -729,10 +730,16 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
     const current = bookRef.current;
     if (!current) return;
     const first = current.firstChapterIndex;
-    // Already mounted: just scroll to it.
+    // Already mounted: scroll to it - unless it is so far down the page that the browser would not paint it
+    // (see MAX_DIRECT_JUMP_OFFSET_PX), in which case the window is reopened at it, like a chapter that is not mounted.
+    // A PDF has no window to reopen, so it always scrolls.
     if (item.chapterIndex >= first && item.chapterIndex < first + current.chaptersHtml.length) {
-      void landOnChapter(item.chapterIndex, item.fragment);
-      return;
+      const chapterEl = getChapterElements(contentRef.current)[item.chapterIndex - first];
+      const top = chapterEl ? chapterEl.getBoundingClientRect().top + window.scrollY : null;
+      if (!epubRef.current || canScrollWithinWindow(top)) {
+        void landOnChapter(item.chapterIndex, item.fragment);
+        return;
+      }
     }
     if (epubRef.current) {
       // Outside the mounted window (far ahead, or before it): reopen the window at that chapter, exactly as a
