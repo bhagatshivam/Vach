@@ -43,6 +43,44 @@ const api = {
     await sleep(300); // the theme is applied after settings load
   },
 
+  /** Opens the Contents drawer (the reader must be showing) and waits for it to settle. */
+  async openToc() {
+    for (let i = 0; i < 200 && !document.querySelector('button[aria-label="Contents"]'); i++) await sleep(50);
+    const button = document.querySelector<HTMLButtonElement>('button[aria-label="Contents"]');
+    if (!button) return false;
+    button.click();
+    for (let i = 0; i < 100 && !document.querySelector('.toc-panel'); i++) await sleep(50);
+    await sleep(400); // the slide-in
+    return Boolean(document.querySelector('.toc-panel'));
+  },
+
+  measureToc() {
+    const panel = document.querySelector<HTMLElement>('.toc-panel')!;
+    const rect = panel.getBoundingClientRect();
+    const title = panel.querySelector('h2')!.getBoundingClientRect();
+    const scroll = panel.querySelector<HTMLElement>('.toc-scroll')!;
+    const scrollRect = scroll.getBoundingClientRect();
+    const current = panel.querySelector<HTMLElement>('[aria-current="true"]');
+    const currentRect = current?.getBoundingClientRect();
+    return {
+      panelLeft: rect.left,
+      panelRight: rect.right,
+      panelTop: rect.top,
+      panelBottom: rect.bottom,
+      innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight,
+      titleTop: title.top,
+      scrollWidth: document.documentElement.scrollWidth,
+      listScrollWidth: scroll.scrollWidth,
+      listClientWidth: scroll.clientWidth,
+      entries: panel.querySelectorAll('.toc-item').length,
+      currentText: current?.textContent ?? null,
+      currentVisible: currentRect ? currentRect.top >= scrollRect.top - 1 && currentRect.bottom <= scrollRect.bottom + 1 : null,
+      panelBackground: getComputedStyle(panel).backgroundColor,
+      percent: panel.querySelector('.toc-percent')?.textContent ?? null,
+    };
+  },
+
   measure() {
     const rect = (sel: string) => document.querySelector(sel)?.getBoundingClientRect();
     const root = document.getElementById('root')!;
@@ -74,7 +112,7 @@ const api = {
    * border, a list row running off the bottom), so each side reports its own share; the old frame was wrong on
    * 100% of the left, right and top edges.
    */
-  async edgePixels(png: string, expected: [number, number, number]) {
+  async edgePixels(png: string, expected: [number, number, number], alsoAllowed: Array<[number, number, number]> = []) {
     const img = new Image();
     img.src = `data:image/png;base64,${png}`;
     await img.decode();
@@ -90,7 +128,7 @@ const api = {
     const other = new Map<string, number>();
     const count = (side: string, x: number, y: number) => {
       const d = ctx.getImageData(x, y, 1, 1).data;
-      const ok = d[0] === expected[0] && d[1] === expected[1] && d[2] === expected[2];
+      const ok = [expected, ...alsoAllowed].some((c) => d[0] === c[0] && d[1] === c[1] && d[2] === c[2]);
       const entry = (stats[side] ??= { themed: 0, total: 0 });
       entry.total++;
       if (ok) entry.themed++;

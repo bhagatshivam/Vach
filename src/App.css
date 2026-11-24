@@ -595,6 +595,13 @@
   pointer-events: none;
 }
 
+.reader-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .reader-title {
   flex: 1;
   min-width: 0;

@@ -121,6 +121,46 @@ for (const vp of VIEWPORTS) {
   await page.close();
 }
 
+// The Contents drawer, open over the reader: it sits under the system bars' insets, is the theme colour, does not
+// overflow, and opens on the current entry.
+for (const vp of VIEWPORTS.slice(0, 2)) {
+  const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, deviceScaleFactor: vp.dpr });
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+  await page.route('http://vach.test/**', (route) =>
+    route.fulfill({ contentType: 'text/html', body: '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"></head><body><div id="root"></div></body></html>' }),
+  );
+  await page.goto('http://vach.test/');
+  await page.addStyleTag({ content: css });
+  await page.evaluate((b64) => { window.__sampleEpub = b64; }, sample);
+  await page.addScriptTag({ content: script });
+  for (const [themeName, theme] of Object.entries(THEMES)) {
+    for (const insets of [null, { top: 36, bottom: 20, left: 0, right: 0 }]) {
+      const label = `${vp.name} ${themeName} Contents drawer${insets ? ' +insets' : ''}`;
+      await page.evaluate(([st, ins]) => window.frame.show('reader', st, ins), [theme.settings, insets]);
+      const opened = await page.evaluate(() => window.frame.openToc());
+      record(`${label}: the Contents button is there and opens the drawer`, opened);
+      if (!opened) continue;
+      const m = await page.evaluate(() => window.frame.measureToc());
+      const shot = await page.screenshot({ type: 'png' });
+      if (themeName === 'night' || themeName === 'sepia') writeFileSync(join(shots, `${vp.name}-${themeName}-contents${insets ? '-insets' : ''}.png`), shot);
+      // The current entry's 3px accent stripe sits on the panel's left edge by design; everything else there is the theme colour.
+      const edges = await page.evaluate(([png, bg]) => window.frame.edgePixels(png, bg, [[124, 58, 237]]), [shot.toString('base64'), theme.bg]);
+      const left = edges.stats.left.themed / edges.stats.left.total;
+      record(`${label}: the panel's left edge is the theme colour (plus the accent stripe and the 1px divider), top to bottom, behind the bars (${(left * 100).toFixed(2)}%)`, left >= 0.995, JSON.stringify(edges.other));
+      record(`${label}: panel background is the theme colour`, m.panelBackground === rgb(theme.bg), m.panelBackground);
+      record(`${label}: the panel covers the full screen height (top ${m.panelTop}, bottom ${m.panelBottom} of ${m.innerHeight})`, m.panelTop <= 0.5 && m.panelBottom >= m.innerHeight - 0.5);
+      record(`${label}: panel is at most 360px / 86% wide and on screen (${Math.round(m.panelRight)}px)`, m.panelLeft >= -0.5 && m.panelRight <= Math.min(360, m.innerWidth * 0.86) + 0.5);
+      record(`${label}: no horizontal overflow (page ${m.scrollWidth} <= ${m.innerWidth}; list ${m.listScrollWidth} <= ${m.listClientWidth})`, m.scrollWidth <= m.innerWidth && m.listScrollWidth <= m.listClientWidth);
+      record(`${label}: ${m.entries} entries; the current one ("${m.currentText}") is highlighted and in view`, m.entries > 1 && m.currentText !== null && m.currentVisible === true);
+      if (insets) record(`${label}: the title clears the status bar (top ${Math.round(m.titleTop)} >= ${insets.top})`, m.titleTop >= insets.top);
+      record(`${label}: shows progress (${m.percent})`, /^\d+%$/.test(m.percent ?? ''));
+    }
+  }
+  record(`${vp.name} Contents drawer: no uncaught page errors`, errors.length === 0, errors.join('; '));
+  await page.close();
+}
+
 // Control: prove the edge check would catch the old white frame.
 {
   const page = await browser.newPage({ viewport: { width: 360, height: 800 }, deviceScaleFactor: 2.75 });

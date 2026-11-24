@@ -5,6 +5,7 @@ import { FileTooLargeError, createFileSource } from '../lib/fileBridge';
 import type { EpubBook } from '../lib/epub';
 import { ChapterList } from '../components/ChapterList';
 import ImageLightbox, { type LightboxImage } from '../components/ImageLightbox';
+import TocDrawer from '../components/TocDrawer';
 import { ImageContext } from '../components/imageContext';
 import { ImageController } from '../lib/imageController';
 import type { FullImage } from '../lib/imageProcessor';
@@ -29,7 +30,8 @@ import {
   resolveAnchorToDocumentY,
   type Anchor,
 } from '../lib/readerAnchor';
-import { anchorForRestore, loadPosition, markOpened, savePosition, type StoredPosition } from '../lib/readingPosition';
+import { ANCHOR_VERSION, anchorForRestore, loadPosition, markOpened, savePosition, type StoredPosition } from '../lib/readingPosition';
+import { ANCHOR_ATTR, flattenToc, weightedProgress, type TocItem } from '../lib/toc';
 import {
   DEFAULT_READER_SETTINGS,
   isDarkTheme,
@@ -152,6 +154,17 @@ function getChapterElements(container: HTMLElement | null): HTMLElement[] {
   return Array.from(container.querySelectorAll(':scope > .chapter'));
 }
 
+/** Where, in document coordinates, a table-of-contents fragment sits inside a mounted chapter; null if the chapter or the id is not there. */
+function fragmentDocumentY(container: HTMLElement | null, chapterIndex: number, firstChapterIndex: number, fragment: string | undefined): number | null {
+  if (!fragment) return null;
+  const chapter = getChapterElements(container)[chapterIndex - firstChapterIndex];
+  if (!chapter) return null;
+  for (const el of Array.from(chapter.querySelectorAll(`[${ANCHOR_ATTR}]`))) {
+    if (el.getAttribute(ANCHOR_ATTR) === fragment) return el.getBoundingClientRect().top + window.scrollY;
+  }
+  return null;
+}
+
 export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderScreenProps) {
   const [settings, setSettings] = useState<ReaderSettings>(DEFAULT_READER_SETTINGS);
   const [book, setBook] = useState<ParsedBook | null>(null);
@@ -205,6 +218,22 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
     | { kind: 'image'; image: LightboxImage; loadFull: () => Promise<FullImage | null> }
     | null
   >(null);
+  // --- Table of contents ---
+  // Null until the book's TOC has been read (and for a book without one).
+  const [toc, setToc] = useState<TocItem[] | null>(null);
+  const [tocOpen, setTocOpen] = useState(false);
+  // Where the reader was when the drawer was opened: which chapter, and overall progress.
+  const [tocView, setTocView] = useState({ chapterIndex: 0, progress: 0 });
+  // An EPUB jump to a chapter outside the mounted window reopens the window at it (the same
+  // way a saved position does); `jump` is that request. A new object each time, so jumping to
+  // the same chapter again still runs.
+  const [jump, setJump] = useState<{ chapterIndex: number; fragment?: string } | null>(null);
+  // A PDF jump to a page the text pass has not reached yet waits for it; null when not waiting.
+  const [jumpWait, setJumpWait] = useState<TocItem | null>(null);
+  const jumpFragmentRef = useRef<string | undefined>(undefined);
+  const savePositionAfterJumpRef = useRef(false);
+  // Each chapter's size, to weight reading progress; null if the book cannot say (or a PDF).
+  const weightsRef = useRef<readonly number[] | null>(null);
   // Kept alive for loading earlier chapters on demand; null for a PDF.
   const epubRef = useRef<EpubBook | null>(null);
   const loadingPreviousRef = useRef(false);
@@ -243,6 +272,10 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
     anchorRef.current = null;
     progressFractionRef.current = 0;
     epubRef.current = null;
+    weightsRef.current = null;
+    setToc(null);
+    setTocOpen(false);
+    setJumpWait(null);
     setImageController(null);
     setLightbox(null);
     loadingPreviousRef.current = false;
@@ -264,10 +297,19 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
         const [savedPosition, opened] = await Promise.all([
           skipRestore
             ? Promise.resolve(null)
-            : loadPosition(file).catch((err) => {
-                console.error('[ReaderScreen] loadPosition failed', err);
-                return null;
-              }),
+            : jump
+              ? // A jump from the table of contents: open at the start of that chapter, as a saved position would.
+                Promise.resolve<StoredPosition>({
+                  anchor: { chapterIndex: jump.chapterIndex, blockIndex: 0, blockFraction: 0 },
+                  anchorVersion: ANCHOR_VERSION,
+                  name: file.name,
+                  size: file.size,
+                  savedAt: Date.now(),
+                })
+              : loadPosition(file).catch((err) => {
+                  console.error('[ReaderScreen] loadPosition failed', err);
+                  return null;
+                }),
           openBookStream(file.uri, file.name, abortController.signal),
         ]);
         if (cancelled) {
@@ -288,6 +330,13 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
 
         pdfHandleRef.current = opened.pdfHandle;
         epubRef.current = opened.epub;
+        weightsRef.current = opened.epub?.chapterWeights ?? null;
+        // The table of contents is read in the background (EPUB: only its nav/ncx file; PDF: the outline).
+        (opened.epub ? opened.epub.toc() : (opened.pdfHandle?.getOutline() ?? Promise.resolve([])))
+          .then((items) => {
+            if (!cancelled) setToc(items);
+          })
+          .catch((err) => console.error('[ReaderScreen] table of contents failed', err));
         if (opened.epub) {
           // Pictures near the screen are downscaled in the background; this
           // book's blob: URLs are revoked when it closes (see the cleanup).
@@ -417,7 +466,7 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [file, skipRestore]);
+  }, [file, skipRestore, jump]);
 
   // --- PDF-specific: lazy windowed rendering of page-image placeholders ---
   // Runs once content is actually visible (contentRevealed - restoring is
@@ -487,7 +536,8 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
       // The saved anchor is book-relative; the DOM holds a window of the
       // book, so translate (and clamp) it to the mounted chapters first.
       const chapters = getChapterElements(contentRef.current);
-      const firstY = resolveAnchorToDocumentY(chapters, toDomAnchor(anchor, firstChapterIndex, chapters.length), window.scrollY);
+      const fragmentY = () => fragmentDocumentY(contentRef.current, anchor.chapterIndex, firstChapterIndex, jumpFragmentRef.current);
+      const firstY = fragmentY() ?? resolveAnchorToDocumentY(chapters, toDomAnchor(anchor, firstChapterIndex, chapters.length), window.scrollY);
       if (firstY !== null) window.scrollTo({ top: firstY, left: 0, behavior: 'instant' });
 
       // Re-verify once after layout has had a chance to settle further -
@@ -500,10 +550,11 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       if (restoreAbortedRef.current) return;
       const chapters2 = getChapterElements(contentRef.current);
-      const secondY = resolveAnchorToDocumentY(chapters2, toDomAnchor(anchor, firstChapterIndex, chapters2.length), window.scrollY);
+      const secondY = fragmentY() ?? resolveAnchorToDocumentY(chapters2, toDomAnchor(anchor, firstChapterIndex, chapters2.length), window.scrollY);
       if (secondY !== null && Math.abs(secondY - window.scrollY) > 2) {
         window.scrollTo({ top: secondY, left: 0, behavior: 'instant' });
       }
+      jumpFragmentRef.current = undefined;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [book, restoreTarget, contentRevealed, error]);
@@ -586,6 +637,7 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
     // the start, ignoring the saved position. (A PDF, or an EPUB that was
     // already mounted from chapter 0, only needs the overlay dismissed.)
     if (book && book.firstChapterIndex > 0) {
+      setJump(null);
       setSkipRestore(true);
       return;
     }
@@ -605,7 +657,12 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
     const anchor = toAbsoluteAnchor(domAnchor, firstChapterIndex);
     const chapterEl = chapters[domAnchor.chapterIndex];
     const blockCount = chapterEl ? flattenToLeafBlocks(chapterEl).length : 0;
-    const progressFraction = computeProgressFraction(anchor, blockCount, totalChapters ?? firstChapterIndex + chapters.length);
+    const total = totalChapters ?? firstChapterIndex + chapters.length;
+    // An EPUB's progress is weighted by chapter size (a short interlude counts for less than a long
+    // chapter); a PDF, or a book whose sizes are unknown, counts chapters equally.
+    const progressFraction = weightsRef.current
+      ? weightedProgress(weightsRef.current, anchor.chapterIndex, blockCount > 0 ? (anchor.blockIndex + anchor.blockFraction) / blockCount : 0, total)
+      : computeProgressFraction(anchor, blockCount, total);
     return { anchor, progressFraction };
   }, [totalChapters]);
 
@@ -638,6 +695,76 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
     const y = anchorScrollTarget(chapters, anchor, bookRef.current?.firstChapterIndex ?? 0, window.scrollY);
     if (y !== null && needsScroll(window.scrollY, y)) window.scrollTo({ top: y, left: 0, behavior: 'instant' });
   }, []);
+
+  // --- Table of contents: opening the drawer and jumping ---
+  function openToc() {
+    // Measured now, not taken from the last debounced save, so "current" is exactly where the reader is.
+    const measured = measureAnchor();
+    setTocView({ chapterIndex: measured?.anchor.chapterIndex ?? 0, progress: measured?.progressFraction ?? progressFractionRef.current });
+    setShowSettings(false);
+    setTocOpen(true);
+  }
+
+  // Scrolls an already-mounted chapter (or a spot inside it) to the top of the screen, checks once more
+  // after layout has settled, then saves that as the reading position.
+  async function landOnChapter(chapterIndex: number, fragment: string | undefined): Promise<void> {
+    const target = () => {
+      const first = bookRef.current?.firstChapterIndex ?? 0;
+      const chapterEl = getChapterElements(contentRef.current)[chapterIndex - first];
+      if (!chapterEl) return null;
+      return fragmentDocumentY(contentRef.current, chapterIndex, first, fragment) ?? chapterEl.getBoundingClientRect().top + window.scrollY;
+    };
+    const first = target();
+    if (first === null) return;
+    window.scrollTo({ top: Math.max(0, first), left: 0, behavior: 'instant' });
+    setNavVisible(false);
+    await nextFrames(2);
+    const second = target();
+    if (second !== null && Math.abs(second - window.scrollY) > 2) window.scrollTo({ top: Math.max(0, second), left: 0, behavior: 'instant' });
+    flushFresh();
+  }
+
+  function jumpToTocItem(item: TocItem) {
+    setTocOpen(false);
+    const current = bookRef.current;
+    if (!current) return;
+    const first = current.firstChapterIndex;
+    // Already mounted: just scroll to it.
+    if (item.chapterIndex >= first && item.chapterIndex < first + current.chaptersHtml.length) {
+      void landOnChapter(item.chapterIndex, item.fragment);
+      return;
+    }
+    if (epubRef.current) {
+      // Outside the mounted window (far ahead, or before it): reopen the window at that chapter, exactly as a
+      // saved position does - nothing before it is parsed.
+      jumpFragmentRef.current = item.fragment;
+      savePositionAfterJumpRef.current = true;
+      setJump({ chapterIndex: item.chapterIndex, fragment: item.fragment });
+      return;
+    }
+    // A PDF: the text pass is still working toward that page. Wait for it, visibly and cancelably.
+    setJumpWait(item);
+  }
+
+  // The reopened window has been revealed at the jump target: save it as the new position.
+  useEffect(() => {
+    if (!contentRevealed || !savePositionAfterJumpRef.current) return;
+    savePositionAfterJumpRef.current = false;
+    setNavVisible(false);
+    const frame = requestAnimationFrame(() => flushFresh());
+    return () => cancelAnimationFrame(frame);
+  }, [contentRevealed, flushFresh]);
+
+  // A PDF jump waits for the page to arrive from the text pass, then lands on it.
+  useEffect(() => {
+    if (!jumpWait || !book) return;
+    const loadedEnd = book.firstChapterIndex + book.chaptersHtml.length;
+    if (jumpWait.chapterIndex >= loadedEnd && !book.isComplete) return;
+    setJumpWait(null);
+    void landOnChapter(Math.min(jumpWait.chapterIndex, loadedEnd - 1), undefined);
+    // landOnChapter only reads refs and stable callbacks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jumpWait, book]);
 
   // Lets table adaptation change heights (a wide table becoming cards, say)
   // above the reading position without moving the text on screen: note the
@@ -732,16 +859,22 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
     return () => cancelAnimationFrame(frame);
   }, [contentRevealed, cacheAnchor]);
 
-  // Hardware Back closes the expanded table first.
+  // Hardware Back closes whatever is open on top of the page first - the Contents drawer, the
+  // expanded table or picture - before it leaves the book.
   const closeLightbox = useCallback(() => setLightbox(null), []);
-  const lightboxOpen = lightbox !== null;
+  const closeToc = useCallback(() => setTocOpen(false), []);
+  const closeTopOverlay = useCallback(() => {
+    setLightbox(null);
+    setTocOpen(false);
+  }, []);
+  const overlayOpen = lightbox !== null || tocOpen;
   useEffect(() => {
-    if (!lightboxOpen || !overlayCloseRef) return;
-    overlayCloseRef.current = closeLightbox;
+    if (!overlayOpen || !overlayCloseRef) return;
+    overlayCloseRef.current = closeTopOverlay;
     return () => {
-      if (overlayCloseRef.current === closeLightbox) overlayCloseRef.current = null;
+      if (overlayCloseRef.current === closeTopOverlay) overlayCloseRef.current = null;
     };
-  }, [lightboxOpen, overlayCloseRef, closeLightbox]);
+  }, [overlayOpen, overlayCloseRef, closeTopOverlay]);
 
   // Debounced save while actively reading. Deliberately a separate,
   // independent effect from the nav auto-hide timer below - it must never
@@ -882,6 +1015,9 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
     lineHeight: settings.lineHeight,
   };
 
+  // The Contents button appears only once the book has a table of contents worth opening.
+  const hasToc = contentRevealed && toc !== null && flattenToc(toc).length > 1;
+  const jumping = jump !== null && !skipRestore;
   const showRestoreOverlay = Boolean(restoreTarget) && !contentRevealed && !error;
   const restoreTargetChapterNumber = restoreTarget ? restoreTarget.anchor.chapterIndex + 1 : 0;
   const restoreParsedSoFar = Math.min((book?.firstChapterIndex ?? 0) + (book?.chaptersHtml.length ?? 0), restoreTargetChapterNumber);
@@ -896,9 +1032,16 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
           Back
         </button>
         <span className="reader-title">{book?.title ?? file.name}</span>
-        <button className="icon-button" onClick={toggleSettings}>
-          Aa
-        </button>
+        <div className="reader-actions">
+          {hasToc && (
+            <button className="icon-button" onClick={openToc} aria-label="Contents">
+              &#9776;
+            </button>
+          )}
+          <button className="icon-button" onClick={toggleSettings}>
+            Aa
+          </button>
+        </div>
       </header>
 
       {showSettings && (
@@ -1010,7 +1153,7 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
         <div className="restore-overlay" style={{ background: themeColors.background, color: themeColors.text }}>
           <div className="restore-box">
             <span className="spinner" aria-hidden="true" />
-            <p className="restore-text">Restoring your place…</p>
+            <p className="restore-text">{jumping ? 'Opening that chapter…' : 'Restoring your place…'}</p>
             <p className="restore-progress">
               Chapter {restoreParsedSoFar} of {totalChapters ?? restoreTargetChapterNumber}
             </p>
@@ -1035,6 +1178,29 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
           </TableAdaptContext.Provider>
           {!book.isComplete && <p className="loading-more">Loading more…</p>}
         </div>
+      )}
+
+      {jumpWait && book && (
+        <div className="toc-wait" role="status" style={{ background: themeColors.background, color: themeColors.text }}>
+          <span className="spinner" aria-hidden="true" />
+          <span className="toc-wait-text">
+            Getting to &ldquo;{jumpWait.title}&rdquo; &middot; page {Math.min(book.firstChapterIndex + book.chaptersHtml.length, jumpWait.chapterIndex + 1)} of {jumpWait.chapterIndex + 1}
+          </span>
+          <button className="restore-skip-btn" onClick={() => setJumpWait(null)}>
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {tocOpen && toc && (
+        <TocDrawer
+          items={toc}
+          currentChapterIndex={tocView.chapterIndex}
+          progress={tocView.progress}
+          themeStyle={{ background: themeColors.background, color: themeColors.text }}
+          onSelect={jumpToTocItem}
+          onClose={closeToc}
+        />
       )}
 
       {lightbox?.kind === 'table' && (

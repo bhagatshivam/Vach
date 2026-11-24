@@ -23,6 +23,8 @@ vi.mock('../lib/epubFile', async () => {
   openEpubFile: async () => ({
     images: new ImageStore(),
     close() {},
+    toc: async () => [],
+    chapterWeights: null,
     title: 'Tables',
     chapterCount: 1,
     loadChapter: async () => '',
