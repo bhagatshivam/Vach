@@ -60,5 +60,13 @@ export async function openEpubFile(
     size: source.size,
     read: (begin, end) => source.read(begin, end, options.signal),
   });
-  return openEpub(archive, fallbackTitle);
+  return openEpub(
+    {
+      has: (path) => archive.has(path),
+      read: (path, maxBytes) => archive.read(path, maxBytes),
+      // Sizes come from the central directory that was already read to open the archive.
+      sizeOf: (path) => archive.entries.get(path)?.uncompressedSize,
+    },
+    fallbackTitle,
+  );
 }

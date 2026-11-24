@@ -35,6 +35,8 @@ vi.mock('../lib/epubFile', async () => {
       const icon = reg('icon.png', 32, 32);
       const inline = reg('inline.png', 400, 400);
       return {
+        toc: async () => [],
+        chapterWeights: null,
         images: store,
         close() {
           hoisted.closed++;
