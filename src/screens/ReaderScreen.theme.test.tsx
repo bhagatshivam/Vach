@@ -18,8 +18,12 @@ vi.mock('@capacitor/preferences', () => ({
 vi.mock('@capacitor/app', () => ({
   App: { addListener: vi.fn(async () => ({ remove: async () => {} })), exitApp: vi.fn() },
 }));
-vi.mock('../lib/epubFile', () => ({
+vi.mock('../lib/epubFile', async () => {
+  const { ImageStore } = await import('../lib/imageProcessor');
+  return {
   openEpubFile: async () => ({
+    images: new ImageStore(),
+    close() {},
     title: 'Book',
     chapterCount: 1,
     loadChapter: async () => '',
@@ -29,7 +33,8 @@ vi.mock('../lib/epubFile', () => ({
       yield { type: 'chapter', html: '<p>hello</p>' };
     },
   }),
-}));
+  };
+});
 
 import { resetSystemThemeForTests } from '../lib/systemTheme';
 
