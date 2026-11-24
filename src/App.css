@@ -12,6 +12,25 @@
   display: flex;
   flex-direction: column;
   min-height: 100svh;
+  width: 100%;
+  box-sizing: border-box;
+  /* Full-bleed: the theme colour (inline style) runs to every screen edge,
+     behind the system bars. Only the bars' insets are padded. */
+  padding: var(--sat) var(--sar) var(--sab) var(--sal);
+}
+
+/* The readable column. The old #root frame (480px, 24px/16px padding) lives
+   here now, so on a wide screen or in landscape only the content narrows, never
+   the background. */
+.library-column {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 480px;
+  margin: 0 auto;
+  box-sizing: border-box;
+  padding: 24px 16px;
 }
 
 .status {
@@ -31,7 +50,7 @@
   align-items: center;
   justify-content: center;
   gap: 16px;
-  padding: 24px;
+  padding: calc(24px + var(--sat)) calc(24px + var(--sar)) calc(24px + var(--sab)) calc(24px + var(--sal));
   text-align: center;
 }
 
@@ -142,6 +161,27 @@
   opacity: 0.6;
   max-width: 32ch;
   line-height: 1.5;
+}
+
+.empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* A visible "add" entry point next to the gear, so adding books is not hidden in the sheet. */
+.add-btn {
+  width: auto;
+  padding: 0 12px;
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .primary-btn {
@@ -438,7 +478,7 @@
   overflow-y: auto;
   border-radius: 16px 16px 0 0;
   border-top: 1px solid rgba(128, 128, 128, 0.3);
-  padding: 8px 16px 24px;
+  padding: 8px calc(16px + var(--sar)) calc(24px + var(--sab)) calc(16px + var(--sal));
 }
 
 .sheet-header {
@@ -519,11 +559,16 @@
 
 .reader {
   min-height: 100svh;
+  width: 100%;
+  box-sizing: border-box;
+  /* Full-bleed like .library: the themed background reaches every edge and the
+     system bars' insets are padded. The 56px reserved for the fixed header now
+     starts below the status bar. */
   /* Reserves space for .reader-header, which is position: fixed and so no
      longer occupies layout space of its own - without this, the settings
      panel/content would render underneath it. Kept a little generous since
      the header's rendered height isn't measured here. */
-  padding-top: 56px;
+  padding: calc(56px + var(--sat)) var(--sar) var(--sab) var(--sal);
 }
 
 .reader-header {
@@ -536,7 +581,8 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 12px 16px;
+  /* Starts at the very top of the screen, so its themed background also fills the status bar. */
+  padding: calc(12px + var(--sat)) max(16px, var(--sar)) 12px max(16px, var(--sal));
   border-bottom: 1px solid rgba(128, 128, 128, 0.25);
   transition:
     opacity 0.25s ease,
@@ -579,16 +625,16 @@
      panel really was inserted) but the panel rendered off-screen above
      the visible area, indistinguishable from the tap doing nothing. */
   position: fixed;
-  top: 56px;
+  top: calc(56px + var(--sat));
   left: 0;
   right: 0;
   z-index: 15;
-  max-height: calc(100svh - 56px);
+  max-height: calc(100svh - 56px - var(--sat));
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 16px;
+  padding: 16px max(16px, var(--sar)) calc(16px + var(--sab)) max(16px, var(--sal));
   border-bottom: 1px solid rgba(128, 128, 128, 0.25);
 }
 
@@ -636,6 +682,11 @@
 }
 
 .reader-content {
+  /* The text column is exactly what it was inside the old 480px / 16px #root
+     frame (448px at most, 16px from each edge on a phone), now made here so the
+     background around it can be full-bleed. */
+  box-sizing: border-box;
+  width: min(100% - 32px, 448px);
   max-width: 640px;
   margin: 0 auto;
   padding: 24px 20px 64px;
@@ -669,7 +720,7 @@
    rather than wait or use "Start from beginning". */
 .restore-overlay {
   position: fixed;
-  top: 56px;
+  top: calc(56px + var(--sat));
   left: 0;
   right: 0;
   bottom: 0;

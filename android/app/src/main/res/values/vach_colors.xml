@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Same as the page's first-paint colour in src/index.css (the light background). -->
+    <color name="vach_window_background">#FDFCFB</color>
+</resources>

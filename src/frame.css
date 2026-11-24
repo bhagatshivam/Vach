@@ -1,0 +1,19 @@
+/* Overlays (the Expand Grid sheet today) cover the whole screen, including
+   behind the status and navigation bars; only their controls and content keep
+   clear of the bars. Loaded after App.css so these extend its rules without
+   editing them. */
+.lightbox {
+  padding: calc(56px + var(--sat)) calc(12px + var(--sar)) calc(12px + var(--sab)) calc(12px + var(--sal));
+}
+
+.lightbox-close {
+  top: calc(8px + var(--sat));
+  right: calc(8px + var(--sar));
+}
+
+/* The image lightbox's toolbar (Close / Invert) in the same way, once that component is in. */
+.lightbox-toolbar {
+  top: calc(8px + var(--sat));
+  right: calc(8px + var(--sar));
+  left: calc(8px + var(--sal));
+}

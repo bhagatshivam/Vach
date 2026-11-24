@@ -11,6 +11,7 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         Log.d(TAG, "onCreate() registering LibraryFolderPlugin before super.onCreate()");
         registerPlugin(LibraryFolderPlugin.class);
+        registerPlugin(SystemThemePlugin.class);
         super.onCreate(savedInstanceState);
         Log.d(TAG, "onCreate() done, bridge=" + getBridge());
     }

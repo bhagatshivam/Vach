@@ -5,9 +5,22 @@
   --accent: #7c3aed;
   --danger: #b91c1c;
 
+  /* Where the system bars (status bar, gesture/navigation bar) and a display
+     cutout overlap the app. The page draws edge to edge (viewport-fit=cover),
+     so screens pad their own content by these; their backgrounds do not.
+     env() is the WebView's own value; --safe-area-inset-* is what Capacitor's
+     SystemBars plugin injects as a fallback. They agree where both exist, and
+     are 0 where Capacitor pads the window itself instead. */
+  --sat: max(env(safe-area-inset-top, 0px), var(--safe-area-inset-top, 0px));
+  --sar: max(env(safe-area-inset-right, 0px), var(--safe-area-inset-right, 0px));
+  --sab: max(env(safe-area-inset-bottom, 0px), var(--safe-area-inset-bottom, 0px));
+  --sal: max(env(safe-area-inset-left, 0px), var(--safe-area-inset-left, 0px));
+
   font: 16px/1.5 system-ui, 'Segoe UI', Roboto, sans-serif;
   color-scheme: light dark;
   color: var(--text);
+  /* First-paint fallback only (no white flash on launch): the active reading
+     theme replaces it as soon as it is known - see lib/systemTheme.ts. */
   background: var(--bg);
 }
 
@@ -21,14 +34,23 @@
   }
 }
 
-body {
+/* Full-bleed: no frame around the app. Screens paint their own theme colour
+   edge to edge; anything they do not cover is the theme colour too, because
+   the theme is also written onto <html> and <body>. */
+html,
+body,
+#root {
   margin: 0;
+  padding: 0;
+  width: 100%;
+  min-height: 100svh;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
 }
 
 #root {
-  max-width: 480px;
-  margin: 0 auto;
-  min-height: 100svh;
   box-sizing: border-box;
-  padding: 24px 16px;
 }

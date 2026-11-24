@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { App as CapacitorApp } from '@capacitor/app';
 import './App.css';
+import './frame.css';
 import LibraryScreen from './screens/LibraryScreen';
 import ReaderScreen from './screens/ReaderScreen';
 import ReaderErrorBoundary from './ReaderErrorBoundary';
