@@ -124,3 +124,19 @@ export const THEME_COLORS: Record<Exclude<ThemeName, 'custom'>, { background: st
   night: { background: '#121212', text: '#d8d8d8' },
   beige: { background: '#ddd7c8', text: '#2b2b2b' },
 };
+
+/** Perceived brightness (0-1) of a #rgb / #rrggbb colour. */
+function luminance(hex: string): number {
+  const full = hex.length === 4 ? `#${hex[1]}${hex[1]}${hex[2]}${hex[2]}${hex[3]}${hex[3]}` : hex;
+  const r = parseInt(full.slice(1, 3), 16) / 255;
+  const g = parseInt(full.slice(3, 5), 16) / 255;
+  const b = parseInt(full.slice(5, 7), 16) / 255;
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/** Is the reader on a dark background (the night theme, or a custom colour that is dark)? */
+export function isDarkTheme(settings: Pick<ReaderSettings, 'theme' | 'customBackground'>): boolean {
+  if (settings.theme === 'night') return true;
+  if (settings.theme !== 'custom') return false;
+  return luminance(settings.customBackground) < 0.4;
+}

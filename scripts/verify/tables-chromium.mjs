@@ -31,6 +31,8 @@ await build({
   root: repo,
   configFile: false,
   logLevel: 'warn',
+  plugins: [(await import(pathToFileURL(require.resolve('@vitejs/plugin-react')).href)).default()],
+  define: { 'process.env.NODE_ENV': '"production"' },
   build: { outDir, emptyOutDir: true, minify: false, cssCodeSplit: false, lib: { entry: join(here, 'page-entry.ts'), name: 'vachVerify', formats: ['iife'], fileName: () => 'page-entry.js' } },
 });
 const script = readFileSync(join(outDir, 'page-entry.js'), 'utf8');
@@ -89,7 +91,8 @@ for (const [width, height, label] of [
 
   if (width === 360) {
     const grid = await page.evaluate(() => window.verify.openGrid());
-    record('360 px: Expand Grid opens a copy that scrolls sideways (the one place that is allowed) with no reader labels', Boolean(grid && grid.scrollsSideways && !grid.hasLabels && !/vach-table-(cards|collapsed|compact)/.test(grid.tableClasses)), JSON.stringify(grid));
+    record('360 px: Expand Grid opens the full grid (no reader labels) in the lightbox, wider than the screen', Boolean(grid && grid.widerThanScreen && grid.startsAtLeftEdge && !grid.hasLabels && !/vach-table-(cards|collapsed|compact)/.test(grid.tableClasses)), JSON.stringify(grid));
+    record('360 px: ...and the grid pans (clamped to its edge) and pinch-zooms', Boolean(grid && grid.panMoves && grid.panClamped && grid.pinchZooms), '');
     await page.evaluate(() => window.verify.closeGrid());
 
     const planted = await page.evaluate(() => {

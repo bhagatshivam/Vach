@@ -277,25 +277,25 @@ describe('sanitizeChapterHtml - legitimate content survives (feature matrix)', (
     expect(html).toContain('text-align: center');
   });
 
-  it('resolves a plain <img src> to the real data: URI from the manifest', async () => {
+  it('resolves a plain <img src> to one of the app\'s own blob: URLs for the manifest image', async () => {
     const html = await sanitizedChapter('<img src="../Images/cover.png" alt="cover">');
-    expect(html).toMatch(/<img[^>]*src="data:image\/png;base64,/);
+    expect(html).toMatch(/<img[^>]*src="blob:[^"]+"/);
+    expect(html).not.toMatch(/src="data:/);
     expect(html).toContain('alt="cover"');
   });
 
   // Regression test: DOMPurify checks every allowed attribute's *value*
   // against ALLOWED_URI_REGEXP unless the attribute name is in its own
-  // uri-safe exemption list - our narrow "data:image/..." regexp (correct
-  // for src) was silently dropping width/height/colspan/rowspan/lang/dir
-  // whenever their value didn't look like a data:image URI, i.e. always.
-  // This caught that before it ever reached a real table/image.
-  it('keeps width/height/colspan/rowspan/lang/dir with real values (not silently stripped by the img-src URI check)', async () => {
+  // uri-safe exemption list - our narrow "blob:" regexp (correct for src)
+  // was silently dropping width/height/colspan/rowspan/lang/dir whenever
+  // their value didn't look like a blob: URL, i.e. always. This caught that
+  // before it ever reached a real table/image. (An <img>'s own width/height
+  // are the sniffed truth now - see the image-stamping tests below - so this
+  // checks the table attributes.)
+  it('keeps colspan/rowspan/lang/dir with real values (not silently stripped by the img-src URI check)', async () => {
     const html = await sanitizedChapter(
-      '<img src="../Images/cover.png" width="100" height="50">' +
-        '<table><tbody><tr><td colspan="2" rowspan="3" lang="en" dir="ltr">cell</td></tr></tbody></table>',
+      '<table><tbody><tr><td colspan="2" rowspan="3" lang="en" dir="ltr">cell</td></tr></tbody></table>',
     );
-    expect(html).toContain('width="100"');
-    expect(html).toContain('height="50"');
     expect(html).toContain('colspan="2"');
     expect(html).toContain('rowspan="3"');
     expect(html).toContain('lang="en"');
@@ -308,10 +308,11 @@ describe('sanitizeChapterHtml - legitimate content survives (feature matrix)', (
     expect(html).toContain('width="100"');
   });
 
-  it('converts an SVG-wrapped cover image (<svg><image xlink:href>) into a plain <img data:...>, unwrapping the <svg>', async () => {
+  it('converts an SVG-wrapped cover image (<svg><image xlink:href>) into a plain <img blob:...>, unwrapping the <svg>', async () => {
     const html = await sanitizedChapter('<svg width="10" height="10"><image xlink:href="../Images/cover.png" width="10" height="10"/></svg>');
     expect(html).not.toContain('<svg');
-    expect(html).toMatch(/<img[^>]*src="data:image\/png;base64,/);
+    expect(html).toMatch(/<img[^>]*src="blob:[^"]+"/);
+    expect(html).toContain('aspect-ratio: 1 / 1'); // stamped from the image itself, like any other
   });
 
   it('keeps multiple chapters in spine order, each independently sanitized', async () => {
@@ -394,6 +395,78 @@ describe('sanitizeChapterHtml - rigid publisher table geometry is dropped at the
   });
 });
 
+describe('sanitizeChapterHtml - images: only the app\'s own blob: URLs get through', () => {
+  const src = (html: string) => /<img[^>]*src="([^"]*)"/.exec(html)?.[1];
+
+  it('strips a data: image src a book embedded as a URL it never got from the app (and re-hosts a valid inline one)', async () => {
+    const html = await sanitizedChapter('<img src="data:text/html;base64,PHNjcmlwdD4=" alt="x">');
+    expect(src(html)).toBeUndefined();
+    expect(html).not.toMatch(/data:text/);
+  });
+
+  it('turns a book\'s own inline data:image/... picture into a blob: URL like any other image', async () => {
+    const html = await sanitizedChapter(`<img src="data:image/png;base64,${PNG_1X1_RED_BASE64}" alt="inline">`);
+    expect(src(html)).toMatch(/^blob:/);
+    expect(html).not.toMatch(/src="data:/);
+    expect(html).toContain('aspect-ratio: 1 / 1');
+  });
+
+  it.each([
+    ['a blob: URL the app never made', 'blob:http://localhost/not-ours'],
+    ['a blob: URL from another origin', 'blob:https://evil.example/abcd'],
+    ['http', 'http://evil.example/p.png'],
+    ['https', 'https://evil.example/p.png'],
+    ['javascript:', 'javascript:alert(1)'],
+    ['file:', 'file:///etc/passwd'],
+    ['a relative path that does not resolve', '../Images/missing.png'],
+  ])('strips %s', async (_label, url) => {
+    const html = await sanitizedChapter(`<img src="${url}" alt="x">`);
+    expect(src(html)).toBeUndefined();
+  });
+
+  it('stamps width, height, aspect-ratio, loading and decoding from the image itself, replacing whatever the book claimed', async () => {
+    const html = await sanitizedChapter(
+      '<img src="../Images/cover.png" alt="c" width="9999" height="1" style="width: 5px; aspect-ratio: 9 / 1; color: red" loading="eager" decoding="sync">',
+    );
+    expect(html).toContain('width="1"');
+    expect(html).toContain('height="1"');
+    expect(html).toContain('style="width: 1px; aspect-ratio: 1 / 1"');
+    expect(html).toContain('loading="lazy"');
+    expect(html).toContain('decoding="async"');
+    expect(html).not.toMatch(/9999|eager|"sync"|color/);
+  });
+
+  it('keeps a small image that sits inside a line of text inline, and a standalone one as a block', async () => {
+    const inline = await sanitizedChapter('<p>before <img src="../Images/cover.png" alt="i"> after</p>');
+    expect(inline).toContain('display: inline-block');
+    expect(inline).toContain('vertical-align: middle');
+    const alone = await sanitizedChapter('<p><img src="../Images/cover.png" alt="i"></p>');
+    expect(alone).not.toContain('display');
+    const inDiv = await sanitizedChapter('<div><img src="../Images/cover.png" alt="i"><p>A caption paragraph.</p></div>');
+    expect(inDiv).not.toContain('display'); // text in a sibling BLOCK is not text in the same line
+  });
+
+  it('an image that does not resolve loses its src and any style the book gave it', async () => {
+    const html = await sanitizedChapter('<img src="../Images/nope.png" alt="gone" style="width: 4000px; aspect-ratio: 1 / 9">');
+    expect(src(html)).toBeUndefined();
+    expect(html).not.toContain('style=');
+    expect(html).toContain('alt="gone"');
+  });
+
+  it('image-only style properties (width, aspect-ratio, display) are never honored on any other element', async () => {
+    const html = await sanitizedChapter(
+      '<p style="width: 640px; aspect-ratio: 1 / 1; display: inline-block; text-align: center">x</p><td style="width: 10px">y</td>',
+    );
+    expect(html).not.toMatch(/width|aspect-ratio|display/);
+    expect(html).toContain('text-align: center');
+  });
+
+  it('only the exact values the reader stamps survive on loading/decoding, and only on <img>', async () => {
+    const html = await sanitizedChapter('<p loading="lazy" decoding="async">x</p>');
+    expect(html).not.toMatch(/loading|decoding/);
+  });
+});
+
 describe('per-entry decompressed-size cap (pathological chapters/images)', () => {
   it(
     'shows the per-chapter error placeholder for a chapter whose decompressed size exceeds the cap, without affecting its neighbors',
@@ -428,6 +501,6 @@ describe('per-entry decompressed-size cap (pathological chapters/images)', () =>
   it('still loads a normal-sized chapter and image well within the caps', async () => {
     const html = await sanitizedChapter('<p>NORMAL_MARKER</p><img src="../Images/cover.png" alt="x">');
     expect(html).toContain('NORMAL_MARKER');
-    expect(html).toMatch(/<img[^>]*src="data:image\/png;base64,/);
+    expect(html).toMatch(/<img[^>]*src="blob:[^"]+"/);
   });
 });

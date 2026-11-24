@@ -1,5 +1,6 @@
 import JSZip from 'jszip';
 import DOMPurify from 'dompurify';
+import { ImageStore, isOwnBlobUrl, type RegisteredImage } from './imageProcessor';
 
 export type ParseEvent =
   | { type: 'title'; title: string }
@@ -85,15 +86,6 @@ function readEntryBytesCapped(entry: JSZip.JSZipObject, maxBytes: number): Promi
       })
       .resume();
   });
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-  }
-  return btoa(binary);
 }
 
 function localName(el: Element): string {
@@ -271,7 +263,7 @@ const ALLOWED_TAGS = [
 // vector for CSS-based tricks if that ever changes. style is kept but its
 // *value* is independently re-validated below - this list only controls
 // which attribute names can exist at all.
-const ALLOWED_ATTR = ['alt', 'src', 'width', 'height', 'colspan', 'rowspan', 'lang', 'dir', 'style'];
+const ALLOWED_ATTR = ['alt', 'src', 'width', 'height', 'colspan', 'rowspan', 'lang', 'dir', 'style', 'loading', 'decoding'];
 
 // Inline style: a short allowlist of structural properties only - nothing
 // that can paint, fetch, or navigate. Each property additionally has its
@@ -294,6 +286,12 @@ const ALLOWED_STYLE_PROPS = new Set([
   'margin-right',
 ]);
 
+// Style the reader itself stamps on an <img> (see stampImage) so loading never
+// moves the text: its size, the aspect ratio that reserves its height, and -
+// for a small image sitting inside a line of text - inline placement. Allowed
+// on <img> ONLY; on any other element these are as forbidden as before.
+const IMAGE_STYLE_PROPS = new Set(['width', 'aspect-ratio', 'display', 'vertical-align']);
+
 const LENGTH_OR_AUTO = /^(-?\d+(\.\d+)?(px|em|rem|%)?|auto)$/;
 
 function isSafeStyleValue(prop: string, value: string): boolean {
@@ -310,6 +308,14 @@ function isSafeStyleValue(prop: string, value: string): boolean {
       return /^(normal|bold|bolder|lighter|[1-9]00)$/i.test(v);
     case 'text-decoration':
       return /^(none|underline|overline|line-through)(\s+(underline|overline|line-through))*$/i.test(v);
+    case 'width':
+      return /^\d{1,6}px$/.test(v);
+    case 'aspect-ratio':
+      return /^\d{1,6}(\.\d+)?\s*\/\s*\d{1,6}(\.\d+)?$/.test(v);
+    case 'display':
+      return /^(inline|inline-block)$/i.test(v);
+    case 'vertical-align':
+      return /^(baseline|middle|top|bottom|text-top|text-bottom)$/i.test(v);
     case 'margin':
     case 'margin-top':
     case 'margin-bottom':
@@ -323,7 +329,7 @@ function isSafeStyleValue(prop: string, value: string): boolean {
   }
 }
 
-function sanitizeStyleAttr(style: string): string {
+function sanitizeStyleAttr(style: string, isImage = false): string {
   return style
     .split(';')
     .map((decl) => decl.trim())
@@ -333,7 +339,7 @@ function sanitizeStyleAttr(style: string): string {
       if (idx === -1) return null;
       const prop = decl.slice(0, idx).trim().toLowerCase();
       const value = decl.slice(idx + 1).trim();
-      if (!ALLOWED_STYLE_PROPS.has(prop) || !isSafeStyleValue(prop, value)) return null;
+      if (!(ALLOWED_STYLE_PROPS.has(prop) || (isImage && IMAGE_STYLE_PROPS.has(prop))) || !isSafeStyleValue(prop, value)) return null;
       return `${prop}: ${value}`;
     })
     .filter((d): d is string => d !== null)
@@ -345,12 +351,13 @@ function sanitizeStyleAttr(style: string): string {
 // sanitizeChapterHtml would stack a duplicate on every call.
 //
 // img src is the only URI-bearing attribute this app allows at all, and it
-// must only ever be a data: URI for an image - resolveImage() (below) is the
-// only thing that ever produces one, from bytes this app itself decompressed
-// out of the EPUB's own manifest. Anything else (a relative path that
-// survived unresolved, http(s):, javascript:, data:text/html) is dropped.
-// ALLOWED_URI_REGEXP enforces the same rule at the DOMPurify-config level as
-// a second, independent check.
+// must only ever be a blob: URL that THIS APP created for an image from the
+// book's own archive (imageProcessor.ts keeps the list; a URL is on it from
+// the moment it is made until the book closes). A book cannot name one it was
+// not handed. Anything else - a relative path that survived unresolved,
+// http(s):, javascript:, data: of any kind - is dropped, and so is a blob: URL
+// from anywhere else. ALLOWED_URI_REGEXP enforces the blob: scheme at the
+// DOMPurify-config level as a second, independent check.
 // Publishers hard-code table geometry (<table width="800">, <td width="120">,
 // <col width=...>). Left in, it fights the reader's own table layout - a
 // fixed width wider than the screen is exactly what makes a table overflow -
@@ -363,30 +370,34 @@ DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
     return;
   }
   if (data.attrName === 'style') {
-    data.attrValue = sanitizeStyleAttr(data.attrValue);
+    data.attrValue = sanitizeStyleAttr(data.attrValue, node.nodeName === 'IMG');
     if (!data.attrValue) data.keepAttr = false;
     return;
   }
-  if (data.attrName === 'src' && node.nodeName === 'IMG' && !/^data:image\//i.test(data.attrValue)) {
+  if (data.attrName === 'src' && node.nodeName === 'IMG' && !isOwnBlobUrl(data.attrValue)) {
     data.keepAttr = false;
+    return;
   }
+  // The only values the reader itself ever stamps; a book's own are not kept.
+  if (data.attrName === 'loading' && !(node.nodeName === 'IMG' && data.attrValue === 'lazy')) data.keepAttr = false;
+  if (data.attrName === 'decoding' && !(node.nodeName === 'IMG' && data.attrValue === 'async')) data.keepAttr = false;
 });
 
 const DOMPURIFY_CONFIG = {
   ALLOWED_TAGS,
   ALLOWED_ATTR,
-  ALLOWED_URI_REGEXP: /^data:image\//i,
+  ALLOWED_URI_REGEXP: /^blob:/i,
   // DOMPurify checks every allowed attribute's *value* against
   // ALLOWED_URI_REGEXP, not just URI-bearing ones - any attribute whose name
   // isn't in its own small built-in uri-safe list (alt, style, a few others)
   // falls through to that check too, and our regexp is deliberately narrow
-  // (only "data:image/..." - fine for src, nonsensical for a number or a
-  // language code). Without this, width/height/colspan/rowspan/lang/dir were
-  // silently dropped whenever their value didn't start with "data:image/" -
-  // found via a regression test that actually asserted colspan survived a
-  // real sanitize() round trip. src is deliberately not in this list: it's
-  // the one attribute that must keep going through the regexp check.
-  ADD_URI_SAFE_ATTR: ['width', 'height', 'colspan', 'rowspan', 'lang', 'dir'],
+  // (only "blob:..." - fine for src, nonsensical for a number or a language
+  // code). Without this, width/height/colspan/rowspan/lang/dir were silently
+  // dropped whenever their value didn't start with the allowed scheme - found
+  // via a regression test that actually asserted colspan survived a real
+  // sanitize() round trip. src is deliberately not in this list: it's the one
+  // attribute that must keep going through the regexp check (and the hook).
+  ADD_URI_SAFE_ATTR: ['width', 'height', 'colspan', 'rowspan', 'lang', 'dir', 'loading', 'decoding'],
   ALLOW_DATA_ATTR: false,
   // Explicit on top of the allowlist default-deny, so the intent reads
   // clearly even though these are already absent from ALLOWED_TAGS: no
@@ -396,6 +407,49 @@ const DOMPURIFY_CONFIG = {
   // namespace).
   FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'meta', 'link', 'base', 'style', 'svg'],
 };
+
+type ResolveImage = (resolvedHref: string) => Promise<RegisteredImage | null>;
+
+const INLINE_TEXT_TAGS = new Set(['SPAN', 'EM', 'STRONG', 'I', 'B', 'U', 'S', 'SUB', 'SUP', 'SMALL', 'CODE', 'RUBY', 'RT', 'RP', 'DEL', 'INS', 'A']);
+
+/** Is this image part of a line of text (a small glyph or icon among words), rather than a picture standing on its own? */
+function isInTextFlow(img: Element): boolean {
+  const parent = img.parentElement;
+  if (!parent) return false;
+  return Array.from(parent.childNodes).some((node) => {
+    if (node === img) return false;
+    if (node.nodeType === 3) return (node.textContent ?? '').trim().length > 0;
+    return node.nodeType === 1 && INLINE_TEXT_TAGS.has((node as Element).tagName) && (node.textContent ?? '').trim().length > 0;
+  });
+}
+
+/**
+ * Puts what loading needs onto an <img> BEFORE it mounts: its blob: src, its
+ * intrinsic size as width/height, and an aspect-ratio, so the browser reserves
+ * the exact box and the text around it never moves when the picture arrives.
+ * (The width is explicit, not left to the image, because the placeholder shown
+ * until a big image is downscaled is 1x1 and would otherwise size the box.)
+ * loading=lazy and decoding=async keep far-off pictures from being decoded early.
+ * A book's own width/height/style on the tag are replaced by these.
+ */
+function stampImage(img: Element, info: RegisteredImage): void {
+  img.setAttribute('src', info.url);
+  img.setAttribute('loading', 'lazy');
+  img.setAttribute('decoding', 'async');
+
+  const style: string[] = [];
+  if (info.width && info.height) {
+    img.setAttribute('width', String(info.width));
+    img.setAttribute('height', String(info.height));
+    style.push(`width: ${info.width}px`, `aspect-ratio: ${info.width} / ${info.height}`);
+  } else {
+    img.removeAttribute('width');
+    img.removeAttribute('height');
+  }
+  if (isInTextFlow(img)) style.push('display: inline-block', 'vertical-align: middle', 'margin: 0 0.15em');
+  if (style.length > 0) img.setAttribute('style', style.join('; '));
+  else img.removeAttribute('style');
+}
 
 /**
  * SVG-wrapped images (<svg><image xlink:href="..."/></svg>, the standard
@@ -409,60 +463,84 @@ const DOMPURIFY_CONFIG = {
  * its children - unwraps the now-empty <svg>/<g> wrapper around the
  * replacement <img> for free.
  */
-async function convertSvgImagesToImg(
-  doc: Document,
-  chapterDir: string,
-  resolveImage: (resolvedHref: string) => Promise<string | null>,
-): Promise<void> {
+async function convertSvgImagesToImg(doc: Document, chapterDir: string, resolveImage: ResolveImage): Promise<void> {
   for (const image of Array.from(doc.querySelectorAll('image'))) {
     const attrName = image.hasAttribute('xlink:href') ? 'xlink:href' : image.hasAttribute('href') ? 'href' : null;
     const href = attrName ? image.getAttribute(attrName) : null;
-    const dataUri = href ? await resolveImage(resolveRelativePath(chapterDir, href)) : null;
+    const info = href ? await resolveImage(resolveRelativePath(chapterDir, href)) : null;
 
-    if (dataUri) {
+    if (info) {
       const img = doc.createElement('img');
-      img.setAttribute('src', dataUri);
-      const width = image.getAttribute('width');
-      const height = image.getAttribute('height');
-      if (width) img.setAttribute('width', width);
-      if (height) img.setAttribute('height', height);
       image.replaceWith(img);
+      stampImage(img, info);
     } else {
       image.remove();
     }
   }
 }
 
+/** A small, fast, non-cryptographic hash (FNV-1a) - only to tell one embedded picture from another. */
+function hashString(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+const INLINE_DATA_IMAGE = /^data:(image\/[a-z0-9.+-]+)(;base64)?,/i;
+
+/** Bytes of a data:image/... URI a book embedded in its own markup, or null if it is not one (or is too large). */
+function decodeInlineImage(src: string): { bytes: Uint8Array; mediaType: string } | null {
+  const match = INLINE_DATA_IMAGE.exec(src);
+  if (!match || !match[2]) return null;
+  const payload = src.slice(match[0].length);
+  if (payload.length > (MAX_IMAGE_UNCOMPRESSED_BYTES * 4) / 3) return null;
+  try {
+    return { bytes: Uint8Array.from(atob(payload), (c) => c.charCodeAt(0)), mediaType: match[1].toLowerCase() };
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Resolves <img src> to the pre-extracted data: URI for that image (or
- * drops the attribute if it doesn't resolve to a real manifest image) -
- * this is the one and only place a real data:image/* URI is ever produced,
- * which is what the DOMPurify hook above is trusting when it lets an <img
- * src> through.
+ * Resolves every <img src> to the app's own blob: URL for that image (via
+ * resolveImage, which reads it from the archive) and stamps it (stampImage).
+ * An image that doesn't resolve to a real manifest image loses its src. This
+ * is - with convertSvgImagesToImg - the one place an <img src> that survives
+ * the sanitizer is produced, which is what the DOMPurify hook above is trusting.
  */
 async function resolveImgSrcs(
   doc: Document,
   chapterDir: string,
-  resolveImage: (resolvedHref: string) => Promise<string | null>,
+  resolveImage: ResolveImage,
+  registerInline: (bytes: Uint8Array, mediaType: string, key: string) => RegisteredImage,
 ): Promise<void> {
   for (const img of Array.from(doc.querySelectorAll('img'))) {
     const src = img.getAttribute('src');
-    // Already a resolved data: URI - either convertSvgImagesToImg produced
-    // this <img> itself, or (defensively) some other earlier step did.
-    // Re-running it through resolveRelativePath would treat the URI's own
+    // Already resolved (convertSvgImagesToImg produced this <img> itself).
+    // Re-running it through resolveRelativePath would treat the URL's own
     // text as a zip-relative path and mangle it into a lookup miss.
-    if (!src || src.startsWith('data:')) continue;
-    const dataUri = await resolveImage(resolveRelativePath(chapterDir, src));
-    if (dataUri) {
-      img.setAttribute('src', dataUri);
+    if (src && isOwnBlobUrl(src)) continue;
+
+    let info: RegisteredImage | null = null;
+    if (src) {
+      const inline = decodeInlineImage(src);
+      info = inline ? registerInline(inline.bytes, inline.mediaType, `inline:${src.length}:${hashString(src)}`) : await resolveImage(resolveRelativePath(chapterDir, src));
+    }
+    if (info) {
+      stampImage(img, info);
     } else {
+      // Nothing to show: no src, and none of the book's own geometry or styling kept either.
       img.removeAttribute('src');
+      img.removeAttribute('style');
     }
   }
 }
 
 /**
- * Parses a chapter's raw markup, resolves its images to data: URIs, and
+ * Parses a chapter's raw markup, resolves its images to blob: URLs, and
  * runs the result through DOMPurify's default-deny allowlist (see
  * DOMPURIFY_CONFIG above) rather than trying to enumerate everything
  * dangerous. The chapter's own <head> (its <link rel="stylesheet"> and
@@ -472,12 +550,13 @@ async function resolveImgSrcs(
 async function sanitizeChapterHtml(
   rawHtml: string,
   chapterDir: string,
-  resolveImage: (resolvedHref: string) => Promise<string | null>,
+  resolveImage: ResolveImage,
+  registerInline: (bytes: Uint8Array, mediaType: string, key: string) => RegisteredImage,
 ): Promise<string> {
   const doc = new DOMParser().parseFromString(rawHtml, 'text/html');
 
   await convertSvgImagesToImg(doc, chapterDir, resolveImage);
-  await resolveImgSrcs(doc, chapterDir, resolveImage);
+  await resolveImgSrcs(doc, chapterDir, resolveImage, registerInline);
 
   return sanitizePlainFragment(doc.body?.innerHTML ?? '');
 }
@@ -552,6 +631,10 @@ export interface EpubBook {
   loadChapter(index: number): Promise<string>;
   /** Title and total, then chapters `startIndex`..end in order. */
   stream(startIndex?: number): AsyncGenerator<ParseEvent>;
+  /** The book's images: sizes, background downscaling, full-detail decoding for the lightbox. */
+  images: ImageStore;
+  /** Releases everything the book holds (every blob: URL). Call when the book closes. */
+  close(): void;
 }
 
 /**
@@ -587,11 +670,12 @@ export async function openEpub(archive: EpubArchive, fallbackTitle: string): Pro
     manifestByHref.set(item.href, item);
   }
 
-  // Cached across chapters so an image shared by multiple chapters (a
-  // repeated decorative asset, say) is only decompressed once, while still
-  // never touching an image the current chapter doesn't reference.
-  const imageCache = new Map<string, string | null>();
-  async function resolveImage(resolvedHref: string): Promise<string | null> {
+  // One store per open book. Cached across chapters so an image shared by
+  // multiple chapters (a repeated decorative asset, say) is only read once,
+  // while still never touching an image the current chapter doesn't reference.
+  const images = new ImageStore();
+  const imageCache = new Map<string, RegisteredImage | null>();
+  async function resolveImage(resolvedHref: string): Promise<RegisteredImage | null> {
     if (imageCache.has(resolvedHref)) return imageCache.get(resolvedHref) ?? null;
     const item = manifestByHref.get(resolvedHref);
     if (!item?.mediaType.startsWith('image/') || !archive.has(resolvedHref)) {
@@ -600,9 +684,13 @@ export async function openEpub(archive: EpubArchive, fallbackTitle: string): Pro
     }
     try {
       const bytes = await archive.read(resolvedHref, MAX_IMAGE_UNCOMPRESSED_BYTES);
-      const dataUri = `data:${item.mediaType};base64,${bytesToBase64(bytes)}`;
-      imageCache.set(resolvedHref, dataUri);
-      return dataUri;
+      // The store keeps only a way to read the entry again later (for the
+      // downscale and the lightbox), never the original bytes.
+      const info = images.register(resolvedHref, bytes, item.mediaType, {
+        read: () => archive.read(resolvedHref, MAX_IMAGE_UNCOMPRESSED_BYTES),
+      });
+      imageCache.set(resolvedHref, info);
+      return info;
     } catch (err) {
       // Same treatment as an image that doesn't resolve at all - drop it,
       // don't take the whole chapter down over one oversized/corrupt image.
@@ -612,12 +700,18 @@ export async function openEpub(archive: EpubArchive, fallbackTitle: string): Pro
     }
   }
 
+  // A picture embedded in the chapter's own markup as a data: URI: its bytes are
+  // already in memory (they are the markup), so they are what the store re-reads.
+  function registerInline(bytes: Uint8Array, mediaType: string, key: string): RegisteredImage {
+    return images.register(key, bytes, mediaType, { read: async () => bytes });
+  }
+
   async function loadChapter(index: number): Promise<string> {
     const href = chapterHrefs[index];
     if (href === undefined) throw new RangeError(`No chapter ${index} (this book has ${chapterHrefs.length})`);
     try {
       const bytes = await archive.read(href, MAX_CHAPTER_UNCOMPRESSED_BYTES);
-      return await sanitizeChapterHtml(decoder.decode(bytes), dirOf(href), resolveImage);
+      return await sanitizeChapterHtml(decoder.decode(bytes), dirOf(href), resolveImage, registerInline);
     } catch (err) {
       console.error('[epub] failed to parse chapter', href, err);
       return '<p class="chapter-error">[This chapter could not be loaded]</p>';
@@ -628,6 +722,8 @@ export async function openEpub(archive: EpubArchive, fallbackTitle: string): Pro
     title,
     chapterCount: chapterHrefs.length,
     loadChapter,
+    images,
+    close: () => images.revokeAll(),
     async *stream(startIndex = 0) {
       yield { type: 'title', title };
       yield { type: 'total', count: chapterHrefs.length };

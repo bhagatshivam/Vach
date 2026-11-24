@@ -37,8 +37,12 @@ const book = {
   yielded: [] as number[],
 };
 
-vi.mock('../lib/epubFile', () => ({
+vi.mock('../lib/epubFile', async () => {
+  const { ImageStore } = await import('../lib/imageProcessor');
+  return {
   openEpubFile: async () => ({
+    images: new ImageStore(),
+    close() {},
     title: 'Fixture',
     chapterCount: CHAPTERS,
     loadChapter: async (index: number) => {
@@ -55,7 +59,8 @@ vi.mock('../lib/epubFile', () => ({
       }
     },
   }),
-}));
+  };
+});
 
 const file: LibraryFile = { name: 'book.epub', uri: 'content://x/book.epub', path: 'book.epub', size: 123456 };
 
