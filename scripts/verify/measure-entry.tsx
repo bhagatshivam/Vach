@@ -200,7 +200,52 @@ const api = {
       };
       requestAnimationFrame(tick);
     });
-    return { frames, moved: Math.round(moved), shifts, mountChanges, maxChapters, maxNodes, maxPageHeight, stalled: stall > 200 };
+    return { frames, moved: Math.round(moved), shifts, mountChanges, maxChapters, maxNodes, maxPageHeight, stalled: stall > 200, atBookEnd: !document.querySelector('.loading-more') };
+  },
+
+  /**
+   * Watches the page for `ms` while something else (a real touch gesture, driven by the browser's compositor) scrolls it: every
+   * frame, the text block that was on screen the frame before must be where the scroll says it should be. Same check as drag(),
+   * but nothing here scrolls - this is what a finger's fling does.
+   */
+  async watch(ms: number) {
+    const shifts: Array<{ frame: number; block: string; expected: number; actual: number }> = [];
+    const gaps: number[] = [];
+    let frames = 0;
+    let mountChanges = 0;
+    let range = '';
+    let last = performance.now();
+    const from = Number(api.visibleBlock()?.id.split(':')[0] ?? -1);
+    let ref = api.visibleBlock();
+    let refY = window.scrollY;
+    const t0 = performance.now();
+    await new Promise<void>((resolve) => {
+      const tick = (now: number) => {
+        frames++;
+        gaps.push(now - last);
+        last = now;
+        if (ref) {
+          const actual = api.blockTop(ref.id);
+          if (actual !== null) {
+            const expected = ref.top - (window.scrollY - refY);
+            if (Math.abs(actual - expected) > 1.5) shifts.push({ frame: frames, block: ref.id, expected: Math.round(expected * 10) / 10, actual });
+          }
+        }
+        const s = frame().screen();
+        const key = `${s.mounted[0]}-${s.mounted[1]}`;
+        if (key !== range) {
+          if (range) mountChanges++;
+          range = key;
+        }
+        ref = api.visibleBlock();
+        refY = window.scrollY;
+        if (performance.now() - t0 >= ms) return resolve();
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+    const sorted = [...gaps].sort((a, b) => a - b);
+    return { frames, shifts, mountChanges, from, to: Number(api.visibleBlock()?.id.split(':')[0] ?? -1), maxGapMs: Math.round(Math.max(...gaps)), p95GapMs: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), over50: gaps.filter((g) => g > 50).length };
   },
 
   /** Opens the Contents drawer, expands every group, and returns the entries' titles (the drawer is left open for frame.jumpTo). Null if the book has no Contents. */

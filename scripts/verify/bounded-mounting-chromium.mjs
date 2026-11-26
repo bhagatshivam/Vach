@@ -31,7 +31,7 @@ try {
 }
 const { epub, tallEpub, LOREM } = await import('./syntheticBooks.mjs');
 
-const only = (process.env.ONLY ?? 'tall,drag,images,lightbox,font,reopen,docx').split(',');
+const only = (process.env.ONLY ?? 'tall,drag,gesture,images,lightbox,font,reopen,docx').split(',');
 const CPU = Number(process.env.CPU_SLOWDOWN ?? 4);
 const MAX_MOUNTED_PX = 1_500_000;
 
@@ -175,8 +175,48 @@ if (only.includes('drag')) {
   record(`slow drag back up: chapters were mounted above the reader as it went (${up.mountChanges} changes)`, up.mountChanges >= 15);
   // A hard fling over the same book, then back.
   const fastDown = await page.evaluate(() => window.mm.drag(400000, 400));
-  record('fast drag (400 px per frame) over the same book: the text on screen never moved either', fastDown.shifts.length === 0 && !fastDown.stalled, fastDown.shifts.slice(0, 3).map((s) => `frame ${s.frame}: ${s.block} expected ${s.expected} got ${s.actual}`).join('; '));
+  // (It may run into the end of the book, where the page cannot scroll any further: that is not a stall.)
+  record(`fast drag (400 px per frame, ${fastDown.frames} frames, ${(fastDown.moved / 1e3).toFixed(0)}k px) over the same book: the text on screen never moved either, and the reader never ran out of chapters before the end of the book`, fastDown.shifts.length === 0 && (!fastDown.stalled || fastDown.atBookEnd), fastDown.shifts.slice(0, 3).map((s) => `frame ${s.frame}: ${s.block} expected ${s.expected} got ${s.actual}`).join('; '));
   record('drags: no uncaught page errors', errors.length === 0, errors.join('; '));
+  await page.close();
+}
+
+// ---- 2b. a real touch fling, scrolled by the browser's compositor, not by script ---------------------------------------------------
+if (only.includes('gesture')) {
+  const book = await epub(Array.from({ length: 400 }, (_, i) => ({ title: `Chapter ${i + 1}`, paragraphs: 3 + (i % 4), text: LOREM.repeat(2) })), { title: 'Gesture book' });
+  const { page, cdp, errors } = await openPage({ __sampleEpub: book });
+  await open(page, 'gesture.epub');
+  await wait(page, 600);
+  const fling = async (distance, speed, ms) => {
+    const watching = page.evaluate((t) => window.mm.watch(t), ms);
+    await cdp.send('Input.synthesizeScrollGesture', { x: 180, y: 600, yDistance: -distance, speed });
+    return watching;
+  };
+  let allShifts = 0;
+  let totalScrolled = 0;
+  let totalChanges = 0;
+  let worstGap = 0;
+  for (let i = 0; i < 6; i++) {
+    const down = await fling(24000, 8000, 5000);
+    allShifts += down.shifts.length;
+    console.log(`  fling down: chapter ${down.from} -> ${down.to}, ${down.frames} frames, ${down.mountChanges} mount changes, worst gap ${down.maxGapMs} ms`);
+    totalScrolled += Math.abs(down.to - down.from);
+    totalChanges += down.mountChanges;
+    worstGap = Math.max(worstGap, down.maxGapMs);
+    if (down.shifts.length) console.log('  shifts', JSON.stringify(down.shifts.slice(0, 3)));
+  }
+  for (let i = 0; i < 4; i++) {
+    const up = await page.evaluate(() => 0).then(() => fling(-24000, 8000, 5000));
+    allShifts += up.shifts.length;
+    console.log(`  fling up: chapter ${up.from} -> ${up.to}, ${up.frames} frames, ${up.mountChanges} mount changes, worst gap ${up.maxGapMs} ms`);
+    totalScrolled += Math.abs(up.to - up.from);
+    totalChanges += up.mountChanges;
+    worstGap = Math.max(worstGap, up.maxGapMs);
+    if (up.shifts.length) console.log('  shifts', JSON.stringify(up.shifts.slice(0, 3)));
+  }
+  record(`compositor fling: ten 24,000 px flings at 8,000 px/s (${totalScrolled} chapters travelled, scrolled by the compositor, ${totalChanges} changes to the mounted chapters): the text on screen never moved when chapters were unmounted or mounted`, allShifts === 0 && totalChanges >= 10, `${allShifts} shifts, worst frame gap ${worstGap} ms`);
+  record('compositor fling: the screen is painted afterwards', (await ink(page)) > 0.002);
+  record('compositor fling: no uncaught page errors', errors.length === 0, errors.join('; '));
   await page.close();
 }
 
