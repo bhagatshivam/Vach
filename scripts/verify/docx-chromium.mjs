@@ -89,7 +89,7 @@ for (const file of files) {
   r.browserMemoryMB = { before: baseline, peak, growth: peak - baseline };
   const label = `${file.split('/').pop()} (${(statSync(file).size / 1e6).toFixed(2)} MB)`;
   console.log(`   ${JSON.stringify(r)}`);
-  record(`${label}: mammoth ran inside a Web Worker (no DOM needed), no fallback to the main thread`, r.ranInWorker && !r.fellBack);
+  record(`${label}: mammoth ran inside a Web Worker (no DOM needed)`, r.ranInWorker);
   record(`${label}: converted ${r.htmlBytes.toLocaleString()} bytes of HTML, ${r.images} image(s), ${r.chapters} chapter(s)`, r.htmlBytes > 100 && r.chapters >= 1);
 }
 

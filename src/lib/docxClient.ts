@@ -1,24 +1,22 @@
-// Runs the Word converter off the main thread. A Worker keeps a big document from freezing the screen; if a Worker
-// cannot be started (blocked, or an environment without one) the same converter runs on the main thread instead,
-// loaded on demand. Either way mammoth is only fetched when a .docx is actually opened.
+// Runs the Word converter off the main thread, in a Worker, so a big document never freezes the screen. Nothing else
+// loads the converter (mammoth): it is fetched only when a .docx is opened. (There is no main-thread fallback: the
+// same-origin module Worker this needs is exactly what pdf.js already needs to open a PDF on this app's WebView, and a
+// second copy of the converter would cost the APK about 70 KB compressed.)
 import type { DocxConversion } from './docxTypes';
 import { DocxError } from './docxError';
 import type { DocxWorkerReply } from './docxWorker';
 
 export type DocxConverter = (buffer: ArrayBuffer, signal?: AbortSignal) => Promise<DocxConversion>;
 
-async function convertOnMainThread(buffer: ArrayBuffer): Promise<DocxConversion> {
-  const { convertDocx } = await import('./docxConvert');
-  return convertDocx(buffer);
-}
-
 function convertInWorker(buffer: ArrayBuffer, signal?: AbortSignal): Promise<DocxConversion> {
+  if (typeof Worker === 'undefined') return Promise.reject(new DocxError('unreadable'));
   return new Promise<DocxConversion>((resolve, reject) => {
     let worker: Worker;
     try {
       worker = new Worker(new URL('./docxWorker.ts', import.meta.url), { type: 'module' });
     } catch (err) {
-      reject(err);
+      console.error('[docx] could not start the converter', err);
+      reject(new DocxError('unreadable'));
       return;
     }
     const finish = () => {
@@ -37,25 +35,14 @@ function convertInWorker(buffer: ArrayBuffer, signal?: AbortSignal): Promise<Doc
       else reject(new DocxError(reply.code, reply.message));
     };
     worker.onerror = (event) => {
+      console.error('[docx] the converter stopped', event.message);
       finish();
-      reject(new WorkerUnavailable(event.message));
+      reject(new DocxError('unreadable'));
     };
-    // Copied, not transferred: if the worker cannot start, the main thread still has the bytes to convert itself.
+    // Copied, not transferred: the reader keeps its bytes until the book is open (and drops them right after).
     worker.postMessage({ id: 1, buffer });
   });
 }
 
-/** The worker could not be started or crashed before replying (as opposed to the document being bad). */
-class WorkerUnavailable extends Error {}
-
-/** Converts in a Worker, falling back to the main thread if no Worker can run. */
-export const convertDocxBytes: DocxConverter = async (buffer, signal) => {
-  if (typeof Worker === 'undefined') return convertOnMainThread(buffer);
-  try {
-    return await convertInWorker(buffer, signal);
-  } catch (err) {
-    if (err instanceof DocxError || (err instanceof DOMException && err.name === 'AbortError')) throw err;
-    console.warn('[docx] worker unavailable, converting on the main thread', err);
-    return convertOnMainThread(buffer);
-  }
-};
+/** Converts in a Worker. If none can run, the document cannot be opened, and the reader says so in words. */
+export const convertDocxBytes: DocxConverter = (buffer, signal) => convertInWorker(buffer, signal);

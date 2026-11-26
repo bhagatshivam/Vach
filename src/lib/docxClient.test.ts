@@ -4,8 +4,8 @@ import { convertDocxBytes } from './docxClient';
 import { DocxError } from './docxError';
 import type { DocxConversion } from './docxTypes';
 
-// How a document is handed to the converter: in a Worker when there is one, on the main thread when not (or when the
-// Worker cannot start), with the document's own errors passed through intact either way.
+// How a document is handed to the converter: always in a Worker, with the document's own errors passed through intact,
+// and a plain message (not a crash) if no Worker can run.
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -42,16 +42,9 @@ class FakeWorker {
 }
 
 describe('convertDocxBytes', () => {
-  it('with no Worker available, converts on the main thread (real mammoth)', async () => {
+  it('with no Worker available the document cannot be opened, and the message says so', async () => {
     vi.stubGlobal('Worker', undefined);
-    const converted = await convertDocxBytes(sample());
-    expect(converted.title).toBe('Vach DOCX Sample');
-    expect(converted.html).toContain('<h1>Part One: Headings and text</h1>');
-  });
-
-  it('a bad file gives the same DocxError on the main thread', async () => {
-    vi.stubGlobal('Worker', undefined);
-    await expect(convertDocxBytes(new TextEncoder().encode('not a document at all').buffer as ArrayBuffer)).rejects.toMatchObject({ name: 'DocxError', code: 'not-docx' });
+    await expect(convertDocxBytes(sample())).rejects.toMatchObject({ name: 'DocxError', code: 'unreadable' });
   });
 
   it('uses a module Worker when there is one, sends a copy (not the original), and ends it afterwards', async () => {
@@ -80,21 +73,16 @@ describe('convertDocxBytes', () => {
     expect(FakeWorker.instances).toHaveLength(1);
   });
 
-  it('a Worker that cannot start falls back to the main thread, and says so once', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  it('a Worker that cannot start, or stops before answering, is a plain DocxError and the Worker is ended', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
     FakeWorker.instances = [];
     FakeWorker.behaviour = (worker) => worker.onerror!({ message: 'blocked' } as ErrorEvent);
     vi.stubGlobal('Worker', FakeWorker);
-    const converted = await convertDocxBytes(sample());
-    expect(converted.title).toBe('Vach DOCX Sample');
+    await expect(convertDocxBytes(sample())).rejects.toMatchObject({ name: 'DocxError', code: 'unreadable' });
     expect(FakeWorker.instances[0].terminated).toBe(true);
-    expect(warn).toHaveBeenCalledTimes(1);
-  });
 
-  it('a Worker constructor that throws also falls back', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.stubGlobal('Worker', class { constructor() { throw new Error('worker-src blocks this'); } });
-    expect((await convertDocxBytes(sample())).title).toBe('Vach DOCX Sample');
+    await expect(convertDocxBytes(sample())).rejects.toMatchObject({ name: 'DocxError', code: 'unreadable' });
   });
 
   it('aborting ends the Worker and rejects with an AbortError', async () => {
