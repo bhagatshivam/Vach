@@ -2,7 +2,7 @@
 // chosen by window.__libraryMode, with no native plugin.
 import type { LibraryFile } from '../../src/lib/libraryFolder';
 
-const files: LibraryFile[] = ['The Long Road.epub', 'Notes on Water.pdf', 'Field Guide.epub'].map((name) => ({ name, uri: `content://x/${name}`, path: name, size: 1000 }));
+const files: LibraryFile[] = ['The Long Road.epub', 'Notes on Water.pdf', 'Field Guide.epub', 'Meeting Notes.docx'].map((name) => ({ name, uri: `content://x/${name}`, path: name, size: 1000 }));
 
 export async function scanAllSources() {
   const books = (window as unknown as { __libraryMode?: string }).__libraryMode === 'books';
