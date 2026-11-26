@@ -228,19 +228,15 @@ export async function openDocx(bytes: ArrayBuffer, fallbackTitle: string, option
 
   const images = new ImageStore();
   const pictures = new Map(conversion.images.map((image) => [`${DOCX_IMAGE_SCHEME}${image.id}`, image]));
-  const imageCache = new Map<string, RegisteredImage | null>();
 
+  // The store itself remembers the pictures it has registered (and forgets one when its chapters have all unmounted,
+  // see ImageStore.hold), so a picture that comes back with a remounted chapter is registered afresh, not answered
+  // with a stale src.
   async function resolveImage(path: string): Promise<RegisteredImage | null> {
-    if (imageCache.has(path)) return imageCache.get(path) ?? null;
     const picture = pictures.get(path);
-    if (!picture) {
-      imageCache.set(path, null);
-      return null;
-    }
+    if (!picture) return null;
     // The store keeps a way to read the original again (the downscale, the lightbox): here, the bytes themselves.
-    const info = images.register(path, picture.bytes, picture.contentType, { read: async () => picture.bytes });
-    imageCache.set(path, info);
-    return info;
+    return images.register(path, picture.bytes, picture.contentType, { read: async () => picture.bytes });
   }
   const registerInline = (inlineBytes: Uint8Array, mediaType: string, key: string): RegisteredImage => images.register(key, inlineBytes, mediaType, { read: async () => inlineBytes });
 
@@ -270,7 +266,6 @@ export async function openDocx(bytes: ArrayBuffer, fallbackTitle: string, option
     images,
     close: () => {
       images.revokeAll();
-      imageCache.clear();
       pictures.clear();
     },
     async *stream(startIndex = 0): AsyncGenerator<ParseEvent> {

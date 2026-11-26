@@ -271,15 +271,16 @@ describe('ReaderScreen - jumping outside the mounted window (EPUB)', () => {
   });
 });
 
-describe('ReaderScreen - a chapter far down a very tall page (the last chapters of a long book)', () => {
-  // Chromium paints nothing past ~2^23 px of scroll offset, and every chapter after the reader's position stays
-  // mounted, so the last chapters of a long book can sit there. A jump must not land in that zone: it reopens the
-  // window at the chapter, which puts it near the top of a short page.
+describe('ReaderScreen - a chapter far down a very tall book (the last chapters of a long book)', () => {
+  // Chromium paints nothing past ~2^23 px of scroll offset. Only a window of chapters around the reader is mounted
+  // (mountWindow.ts), so the page is never that tall and the last chapters of a long book are not on it: a jump to one
+  // reopens the window at it, which puts it near the top of a short page. A chapter that is in the window is just scrolled to.
+  const mountedCount = () => document.querySelectorAll('.reader-content .chapter').length;
 
-  it('a mounted chapter lower than the paintable limit is not scrolled to: the window is reopened at it', async () => {
-    chapterHeight = 500_000; // chapter 5 starts 2.5M px down
+  it('the page holds a window of the book, not all of it; a chapter that is not mounted reopens the window at it', async () => {
+    chapterHeight = 500_000; // chapter 5 would start 2.5M px down
     await openEpubReader({ toc: LONG_TOC });
-    await waitFor(() => expect(document.querySelectorAll('.reader-content .chapter')).toHaveLength(6)); // the whole book is mounted
+    await waitFor(() => expect(mountedCount()).toBeLessThan(6)); // the chapters far below the screen are not mounted
     scrollTo.mockClear();
 
     fireEvent.click(await screen.findByRole('button', { name: 'Contents' }));
@@ -297,16 +298,16 @@ describe('ReaderScreen - a chapter far down a very tall page (the last chapters 
     }, { timeout: 4000 });
   });
 
-  it('a chapter within the limit is still just scrolled to (no reopening)', async () => {
-    chapterHeight = 500_000; // chapter 2 starts 1M px down
+  it('a chapter that is in the window is still just scrolled to (no reopening)', async () => {
+    chapterHeight = 2_000; // chapters 0-3 are all within the window of a 768px screen: chapter 2 starts 4,000px down
     await openEpubReader({ toc: LONG_TOC });
-    await waitFor(() => expect(document.querySelectorAll('.reader-content .chapter')).toHaveLength(6));
+    await waitFor(() => expect(mountedCount()).toBeGreaterThanOrEqual(4));
     scrollTo.mockClear();
 
     fireEvent.click(await screen.findByRole('button', { name: 'Contents' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Chapter Two' }));
 
-    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: 1_000_000 })));
+    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: 4_000 })));
     expect(store.openCount).toBe(1);
     expect(store.streamStarts).toEqual([0]);
   });
@@ -314,7 +315,7 @@ describe('ReaderScreen - a chapter far down a very tall page (the last chapters 
   it('jumping to the last chapter and then back to the first both end with the target mounted', async () => {
     chapterHeight = 500_000;
     await openEpubReader({ toc: LONG_TOC });
-    await waitFor(() => expect(document.querySelectorAll('.reader-content .chapter')).toHaveLength(6));
+    await waitFor(() => expect(mountedCount()).toBeLessThan(6));
 
     fireEvent.click(await screen.findByRole('button', { name: 'Contents' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Epilogue' }));

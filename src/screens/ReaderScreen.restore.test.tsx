@@ -82,6 +82,14 @@ function setScrollY(value: number) {
   Object.defineProperty(window, 'scrollY', { value, configurable: true, writable: true });
 }
 
+// The stubbed layout below puts the reader 250px into the mounted chapters whatever the scroll offset, so "the reader is far
+// from the top" is modelled by a screen too short to want earlier chapters: the window loads another chapter when fewer
+// than 5 screens of mounted content remain beyond the screen, and 5 screens of 40px is less than the 250px above.
+function setViewportHeight(value: number) {
+  Object.defineProperty(window, 'innerHeight', { value, configurable: true, writable: true });
+}
+const originalInnerHeight = window.innerHeight;
+
 function stubLayout(viewportTopOffset = 250) {
   Element.prototype.getBoundingClientRect = function (this: Element) {
     const section = this.classList.contains('chapter') ? this : this.closest('.chapter');
@@ -98,6 +106,7 @@ beforeEach(() => {
   book.loadCalls.length = 0;
   book.yielded.length = 0;
   setScrollY(0);
+  setViewportHeight(originalInnerHeight);
   Object.defineProperty(document, 'fonts', {
     value: { ready: Promise.resolve(), load: async () => [] },
     configurable: true,
@@ -132,15 +141,17 @@ const mountedChapters = (container: HTMLElement) =>
 describe('ReaderScreen - restoring straight to a saved chapter', () => {
   it('opens an EPUB at its saved chapter without parsing the chapters before it', async () => {
     savePositionJson(8); // legacy-format position, chapter 8 of 12
-    setScrollY(5000); // far from the top: no earlier chapters are loaded yet
+    setViewportHeight(40); // far from the top: no earlier chapters are loaded yet
     const { container } = await renderReader();
 
     await waitForReveal(container);
-    await waitFor(() => expect(container.querySelector('.loading-more')).toBeNull()); // stream finished
+    await waitFor(() => expect(container.querySelector('.loading-more')).toBeNull()); // the window reaches the last chapter
 
     expect(book.streamStarts).toEqual([7]); // chapter 8 minus one chapter of context
-    expect(book.yielded).toEqual([7, 8, 9, 10, 11]); // chapters 0-6 were never parsed
-    expect(book.loadCalls).toEqual([]);
+    // The first chapters of the window come from the stream (the saved chapter plus a few after it) and the rest are
+    // loaded as the reader nears them: chapters 0-6 were never parsed.
+    expect(book.yielded).toEqual([7, 8, 9, 10]);
+    expect(book.loadCalls).toEqual([11]);
     expect(mountedChapters(container)).toEqual(['CH_7', 'CH_8', 'CH_9', 'CH_10', 'CH_11']);
     expect(scrollTo).toHaveBeenCalled(); // jumped to the saved spot
   });
@@ -161,7 +172,9 @@ describe('ReaderScreen - restoring straight to a saved chapter', () => {
     setScrollY(0); // within two viewports of the top: earlier chapters should load
     const { container } = await renderReader();
 
-    await waitFor(() => expect(book.loadCalls).toEqual([6, 5, 4, 3, 2, 1, 0]));
+    // (The chapters after the window are loaded too, as the reader nears them; they are not what is checked here.)
+    const earlier = () => book.loadCalls.filter((index) => index < 7);
+    await waitFor(() => expect(earlier()).toEqual([6, 5, 4, 3, 2, 1, 0]));
     await waitFor(() => expect(mountedChapters(container)).toHaveLength(CHAPTERS));
     expect(mountedChapters(container)).toEqual(Array.from({ length: CHAPTERS }, (_, i) => `CH_${i}`));
 
@@ -185,13 +198,13 @@ describe('ReaderScreen - restoring straight to a saved chapter', () => {
       return rect((Number(text.replace('CH_', '')) - 9) * 100 - 50);
     };
     await renderReader();
-    await waitFor(() => expect(book.loadCalls).toEqual([6, 5, 4, 3, 2, 1, 0]));
+    await waitFor(() => expect(book.loadCalls.filter((index) => index < 7)).toEqual([6, 5, 4, 3, 2, 1, 0]));
     expect(scrollBy).not.toHaveBeenCalled();
   });
 
   it('a stale saved chapter past the end opens at the last chapters instead of hanging', async () => {
     savePositionJson(99);
-    setScrollY(5000);
+    setViewportHeight(40);
     const { container } = await renderReader();
     await waitForReveal(container);
     expect(book.streamStarts).toEqual([10]);
@@ -202,7 +215,9 @@ describe('ReaderScreen - restoring straight to a saved chapter', () => {
     const { container } = await renderReader();
     await waitFor(() => expect(mountedChapters(container)).toHaveLength(CHAPTERS));
     expect(book.streamStarts).toEqual([0]);
-    expect(book.loadCalls).toEqual([]);
+    // Chapters 0-3 come from the stream and the rest are loaded one after the other as the reader nears them; nothing is
+    // loaded before chapter 0, so nothing has to be compensated for.
+    expect(book.loadCalls).toEqual([4, 5, 6, 7, 8, 9, 10, 11]);
     expect(scrollBy).not.toHaveBeenCalled();
   });
 
@@ -224,7 +239,7 @@ describe('ReaderScreen - restoring straight to a saved chapter', () => {
 describe('ReaderScreen - saved positions use chapter indexes, not DOM order', () => {
   it('saves the position as a book chapter index and derives progress from it', async () => {
     savePositionJson(8);
-    setScrollY(5000); // keep the window at chapters 7..11
+    setViewportHeight(40); // keep the window at chapters 7..11
     const onBack = vi.fn();
     const { container } = await renderReader(onBack);
     await waitForReveal(container);

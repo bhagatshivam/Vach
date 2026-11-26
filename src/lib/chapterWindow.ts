@@ -47,12 +47,15 @@ export function toAbsoluteAnchor(domAnchor: Anchor, firstChapterIndex: number): 
  * chapters that are already mounted. Chromium stops painting past about 2^23 px
  * (8.4 million) of scroll offset - the DOM and the geometry still say the text
  * is there, but the screen is blank and stays blank while scrolling near it -
- * and a phone's GPU path may give up earlier. All the chapters after the
- * reader's position are kept mounted, so a long book is a very tall page, and
- * its last chapters sit at the very bottom of it. A chapter lower than this is
- * not scrolled to: the window is reopened at it instead, which puts it near the
- * top of a short page. 2 million px is about 200 screens of text on a phone,
- * more than most novels, and leaves a wide margin below any limit.
+ * and a phone's GPU path may give up earlier.
+ *
+ * Since the mounted chapters became a bounded window around the reader
+ * (mountWindow.ts: at most MAX_MOUNTED_PX, 1.5 million px) a chapter in the
+ * window is always under this, so it is the backstop and no longer the rule:
+ * a jump to a chapter that is not mounted reopens the window at it (the same
+ * way a saved position does) and puts it near the top of a short page. 2
+ * million px is about 200 screens of text on a phone, and leaves a wide margin
+ * below any limit.
  */
 export const MAX_DIRECT_JUMP_OFFSET_PX = 2_000_000;
 
@@ -61,7 +64,11 @@ export function canScrollWithinWindow(topPx: number | null): boolean {
   return topPx !== null && Number.isFinite(topPx) && topPx >= 0 && topPx <= MAX_DIRECT_JUMP_OFFSET_PX;
 }
 
-/** Whether the chapter before the first mounted one should be loaded now. */
+/**
+ * Whether the chapter before the first mounted one should be loaded now, going by the scroll offset alone. The reader
+ * no longer asks this - planWindow (mountWindow.ts) decides from the measured size of the mounted chapters, ahead of
+ * the reader as well as behind - but the rule is kept as a plain, tested statement of the original behaviour.
+ */
 export function shouldLoadPrevious(scrollY: number, viewportHeight: number, firstChapterIndex: number): boolean {
   return firstChapterIndex > 0 && scrollY < PREPEND_TRIGGER_VIEWPORTS * viewportHeight;
 }

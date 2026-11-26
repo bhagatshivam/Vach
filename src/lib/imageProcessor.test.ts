@@ -464,3 +464,154 @@ describe('ImageStore.revokeAll (the book closes)', () => {
     expect(isOwnBlobUrl('')).toBe(false);
   });
 });
+
+// ---- releasing an image when the chapters showing it unmount --------------------------------------------------------
+
+describe('ImageStore.hold (a chapter unmounts: its pictures are released)', () => {
+  /** A big picture (it will be downscaled), registered and downscaled, so it has a blob: URL of its own. */
+  async function downscaled(store: ImageStore, path: string, bytes = pngBytes(4000, 3000)) {
+    const placeholder = store.register(path, bytes, 'image/png', source(bytes)).url;
+    const url = await store.process(placeholder);
+    return { placeholder, url: url! };
+  }
+
+  it('revokes the downscaled blob: URL once the only chapter holding the picture lets go, and forgets the picture', async () => {
+    const { deps, revoked } = fakeDeps();
+    const store = new ImageStore(deps, { dropGraceMs: 0 });
+    const { placeholder, url } = await downscaled(store, 'a.png');
+    const letGo = store.hold([placeholder]);
+    expect(store.known('a.png')).not.toBeNull();
+    expect(store.liveUrlCount).toBe(2); // the shared placeholder and this picture's own
+
+    letGo();
+    expect(revoked).toEqual([url]);
+    expect(store.liveUrlCount).toBe(1); // only the shared placeholder remains
+    expect(store.known('a.png')).toBeNull();
+    expect(store.describe(placeholder)).toBeNull();
+    expect(store.currentUrl(placeholder)).toBe(placeholder);
+    expect(isOwnBlobUrl(url)).toBe(false);
+  });
+
+  it('a picture shared by two chapters lives until both have let go', async () => {
+    const { deps, revoked } = fakeDeps();
+    const store = new ImageStore(deps, { dropGraceMs: 0 });
+    const { placeholder, url } = await downscaled(store, 'shared.png');
+    const first = store.hold([placeholder]);
+    const second = store.hold([url]); // the same picture, by its downscaled src: bySrc knows both
+    first();
+    expect(revoked).toEqual([]);
+    second();
+    expect(revoked).toEqual([url]);
+  });
+
+  it('letting go twice is harmless', async () => {
+    const { deps, revoked } = fakeDeps();
+    const store = new ImageStore(deps, { dropGraceMs: 0 });
+    const { placeholder } = await downscaled(store, 'a.png');
+    const first = store.hold([placeholder]);
+    const second = store.hold([placeholder]);
+    first();
+    first();
+    expect(revoked).toEqual([]);
+    second();
+    expect(revoked).toHaveLength(1);
+  });
+
+  it('a picture nobody ever held is left alone (a chapter that was loaded but not mounted yet)', async () => {
+    const { deps, revoked } = fakeDeps();
+    const store = new ImageStore(deps, { dropGraceMs: 0 });
+    await downscaled(store, 'a.png');
+    store.hold([]);
+    expect(revoked).toEqual([]);
+    expect(store.known('a.png')).not.toBeNull();
+  });
+
+  it('a small picture (shown as it is, no downscale) has its own blob: URL released too', () => {
+    const { deps, revoked } = fakeDeps();
+    const store = new ImageStore(deps, { dropGraceMs: 0 });
+    const bytes = pngBytes(100, 80);
+    const { url } = store.register('icon.png', bytes, 'image/png', source(bytes));
+    expect(url.startsWith('blob:')).toBe(true);
+    store.hold([url])();
+    expect(revoked).toEqual([url]);
+    expect(store.known('icon.png')).toBeNull();
+  });
+
+  it('a picture registered again after it was released starts afresh, with a src of its own', async () => {
+    const { deps } = fakeDeps();
+    const store = new ImageStore(deps, { dropGraceMs: 0 });
+    const bytes = pngBytes(4000, 3000);
+    const first = store.register('a.png', bytes, 'image/png', source(bytes));
+    store.hold([first.url])();
+    const again = store.register('a.png', bytes, 'image/png', source(bytes));
+    expect(again.url).not.toBe(first.url);
+    expect(again.width).toBe(4000);
+    expect(store.isPending(again.url)).toBe(true);
+    expect(await store.process(again.url)).not.toBeNull();
+  });
+
+  it('a downscale still running when the chapter unmounts makes no blob: URL for nobody', async () => {
+    const release: { go: () => void } = { go: () => {} };
+    const { deps, made } = fakeDeps({ resample: () => new Promise((resolve) => (release.go = () => resolve(new Blob(['x'], { type: 'image/webp' })))) });
+    const store = new ImageStore(deps, { dropGraceMs: 0 });
+    const bytes = pngBytes(4000, 3000);
+    const placeholder = store.register('a.png', bytes, 'image/png', source(bytes)).url;
+    const letGo = store.hold([placeholder]);
+    const job = store.process(placeholder);
+    await Promise.resolve();
+    letGo();
+    await vi.waitFor(() => expect(release.go).toBeTypeOf('function'));
+    release.go();
+    expect(await job).toBeNull();
+    expect(made.size).toBe(1); // only the shared placeholder was ever made
+  });
+
+  it('keeps a released picture for a grace period, so a chapter loaded alongside the one that let go can take it over', async () => {
+    vi.useFakeTimers();
+    try {
+      const { deps, revoked } = fakeDeps({ resample: async () => new Blob(['x'], { type: 'image/webp' }) });
+      const store = new ImageStore(deps, { dropGraceMs: 1500 });
+      const bytes = pngBytes(4000, 3000);
+      const placeholder = store.register('a.png', bytes, 'image/png', source(bytes)).url;
+      const url = (await store.process(placeholder))!;
+      store.hold([placeholder])(); // the chapter unmounts...
+      const newcomer = store.hold([placeholder]); // ...in the same commit that another chapter showing it mounts
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(revoked).toEqual([]);
+      expect(store.currentUrl(placeholder)).toBe(url);
+      newcomer();
+      await vi.advanceTimersByTimeAsync(1499);
+      expect(revoked).toEqual([]);
+      await vi.advanceTimersByTimeAsync(2);
+      expect(revoked).toEqual([url]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('closing the book still revokes everything, including pictures waiting out their grace period', async () => {
+    vi.useFakeTimers();
+    try {
+      const { deps, revoked } = fakeDeps({ resample: async () => new Blob(['x'], { type: 'image/webp' }) });
+      const store = new ImageStore(deps, { dropGraceMs: 1500 });
+      const bytes = pngBytes(4000, 3000);
+      const placeholder = store.register('a.png', bytes, 'image/png', source(bytes)).url;
+      await store.process(placeholder);
+      store.hold([placeholder])();
+      store.revokeAll();
+      expect(store.liveUrlCount).toBe(0);
+      const count = revoked.length;
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(revoked).toHaveLength(count); // the timer did not revoke anything twice
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores srcs that are not ours', () => {
+    const { deps, revoked } = fakeDeps();
+    const store = new ImageStore(deps, { dropGraceMs: 0 });
+    store.hold(['blob:http://localhost/not-ours', '', 'https://example.com/x.png'])();
+    expect(revoked).toEqual([]);
+  });
+});

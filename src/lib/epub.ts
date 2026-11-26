@@ -755,28 +755,30 @@ export async function openEpub(archive: EpubArchive, fallbackTitle: string): Pro
   // multiple chapters (a repeated decorative asset, say) is only read once,
   // while still never touching an image the current chapter doesn't reference.
   const images = new ImageStore();
-  const imageCache = new Map<string, RegisteredImage | null>();
+  // Pictures that cannot be used (not an image, missing, too big): remembered so they are not tried again. A usable one
+  // is remembered by the store itself, which forgets it once every chapter showing it has unmounted (ImageStore.hold).
+  const unusable = new Set<string>();
   async function resolveImage(resolvedHref: string): Promise<RegisteredImage | null> {
-    if (imageCache.has(resolvedHref)) return imageCache.get(resolvedHref) ?? null;
+    const known = images.known(resolvedHref);
+    if (known) return known;
+    if (unusable.has(resolvedHref)) return null;
     const item = manifestByHref.get(resolvedHref);
     if (!item?.mediaType.startsWith('image/') || !archive.has(resolvedHref)) {
-      imageCache.set(resolvedHref, null);
+      unusable.add(resolvedHref);
       return null;
     }
     try {
       const bytes = await archive.read(resolvedHref, MAX_IMAGE_UNCOMPRESSED_BYTES);
       // The store keeps only a way to read the entry again later (for the
       // downscale and the lightbox), never the original bytes.
-      const info = images.register(resolvedHref, bytes, item.mediaType, {
+      return images.register(resolvedHref, bytes, item.mediaType, {
         read: () => archive.read(resolvedHref, MAX_IMAGE_UNCOMPRESSED_BYTES),
       });
-      imageCache.set(resolvedHref, info);
-      return info;
     } catch (err) {
       // Same treatment as an image that doesn't resolve at all - drop it,
       // don't take the whole chapter down over one oversized/corrupt image.
       console.error('[epub] image exceeded size cap or failed to decompress, dropping', resolvedHref, err);
-      imageCache.set(resolvedHref, null);
+      unusable.add(resolvedHref);
       return null;
     }
   }
