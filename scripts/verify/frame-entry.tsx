@@ -8,12 +8,13 @@ import '../../src/frame.css';
 import LibraryScreen from '../../src/screens/LibraryScreen';
 import ReaderScreen from '../../src/screens/ReaderScreen';
 import { resetSystemThemeForTests } from '../../src/lib/systemTheme';
+import { savePosition } from '../../src/lib/readingPosition';
 
 let root: Root | null = null;
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 const api = {
-  async show(screen: 'library-empty' | 'library-books' | 'reader', settings: object, insets: { top: number; bottom: number; left: number; right: number } | null) {
+  async show(screen: 'library-empty' | 'library-books' | 'reader', settings: object, insets: { top: number; bottom: number; left: number; right: number } | null, savedChapter?: number) {
     root?.unmount();
     document.body.innerHTML = '<div id="root"></div>';
     document.documentElement.removeAttribute('style');
@@ -30,6 +31,8 @@ const api = {
       s.setProperty('--safe-area-inset-left', `${insets.left}px`);
       s.setProperty('--safe-area-inset-right', `${insets.right}px`);
     }
+    // A reader coming back to a book: open it at a saved position (this is what the real app does on a reopen).
+    if (savedChapter !== undefined) await savePosition({ name: 'sample.epub', size: 1 }, { chapterIndex: savedChapter, blockIndex: 2, blockFraction: 0.3 }, 0.4);
     (window as unknown as { __libraryMode: string }).__libraryMode = screen === 'library-books' ? 'books' : 'empty';
     root = createRoot(document.getElementById('root')!);
     const ref = createRef<(() => void) | null>() as { current: (() => void) | null };
@@ -78,6 +81,51 @@ const api = {
       currentVisible: currentRect ? currentRect.top >= scrollRect.top - 1 && currentRect.bottom <= scrollRect.bottom + 1 : null,
       panelBackground: getComputedStyle(panel).backgroundColor,
       percent: panel.querySelector('.toc-percent')?.textContent ?? null,
+    };
+  },
+
+  /**
+   * Taps a Contents entry by its title (opening the drawer first if needed), waits until the reader has settled, and
+   * reports what is on screen. Used by toc-jump-chromium.mjs: this is the same path a finger takes.
+   */
+  async jumpTo(title: string) {
+    if (!document.querySelector('.toc-panel')) await api.openToc();
+    const entry = Array.from(document.querySelectorAll<HTMLButtonElement>('.toc-item')).find((b) => b.textContent === title);
+    if (!entry) return { error: `no Contents entry "${title}"` };
+    entry.scrollIntoView({ block: 'center' });
+    entry.click();
+    for (let i = 0; i < 300; i++) {
+      await sleep(50);
+      const settled = !document.querySelector('.toc-panel') && !document.querySelector('.restore-overlay') && document.querySelector('.reader-content:not(.pre-reveal)');
+      if (settled && i > 6) break;
+    }
+    await sleep(700); // late layout, the post-jump verification and any neighbours being loaded
+    return api.screen();
+  },
+
+  /** What the reader is showing right now: which chapters are on screen and whether anything is blank. */
+  screen() {
+    const content = document.querySelector<HTMLElement>('.reader-content');
+    const chapters = Array.from(content?.querySelectorAll<HTMLElement>(':scope > .chapter') ?? []);
+    const vh = window.innerHeight;
+    const visible = chapters
+      .map((el) => ({ el, rect: el.getBoundingClientRect() }))
+      .filter(({ rect }) => rect.height > 0 && rect.bottom > 1 && rect.top < vh - 1)
+      .map(({ el, rect }) => ({ marker: /MARK_(\d+)/.exec(el.textContent ?? '')?.[1] ?? '?', top: Math.round(rect.top), bottom: Math.round(rect.bottom) }));
+    const covered = visible.reduce((n, v) => n + Math.max(0, Math.min(v.bottom, vh) - Math.max(v.top, 0)), 0);
+    const marks = chapters.map((el) => Number(/MARK_(\d+)/.exec(el.textContent ?? '')?.[1] ?? -1));
+    return {
+      scrollY: Math.round(window.scrollY),
+      scrollHeight: document.documentElement.scrollHeight,
+      innerHeight: vh,
+      mounted: marks.length > 0 ? [marks[0], marks[marks.length - 1], marks.length] : [],
+      visible,
+      /** Share of the viewport height covered by chapter content. */
+      coveredShare: Math.round((covered / vh) * 100) / 100,
+      contentVisibility: content ? getComputedStyle(content).visibility : 'none',
+      overlay: Boolean(document.querySelector('.restore-overlay')),
+      drawer: Boolean(document.querySelector('.toc-panel')),
+      loadingMore: Boolean(document.querySelector('.loading-more')),
     };
   },
 

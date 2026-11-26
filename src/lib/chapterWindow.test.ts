@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_DIRECT_JUMP_OFFSET_PX,
   PREPEND_TRIGGER_VIEWPORTS,
+  canScrollWithinWindow,
   RESTORE_CONTEXT_CHAPTERS,
   prependCompensation,
   restoreWindowStart,
@@ -90,5 +92,36 @@ describe('prependCompensation', () => {
 
   it('is zero when the browser already compensated', () => {
     expect(prependCompensation(120, 120)).toBe(0);
+  });
+});
+
+describe('canScrollWithinWindow (how far down the page a jump may scroll)', () => {
+  it('allows ordinary positions and refuses ones past the limit', () => {
+    expect(canScrollWithinWindow(0)).toBe(true);
+    expect(canScrollWithinWindow(750_000)).toBe(true);
+    expect(canScrollWithinWindow(MAX_DIRECT_JUMP_OFFSET_PX)).toBe(true);
+    expect(canScrollWithinWindow(MAX_DIRECT_JUMP_OFFSET_PX + 1)).toBe(false);
+    expect(canScrollWithinWindow(8_400_000)).toBe(false);
+  });
+
+  it('the limit sits far below where Chromium stops painting (2^23 px)', () => {
+    expect(MAX_DIRECT_JUMP_OFFSET_PX).toBeLessThanOrEqual(2 ** 23 / 4);
+  });
+
+  it('refuses a position it cannot measure', () => {
+    expect(canScrollWithinWindow(null)).toBe(false);
+    expect(canScrollWithinWindow(Number.NaN)).toBe(false);
+    expect(canScrollWithinWindow(-1)).toBe(false);
+  });
+});
+
+describe('shouldLoadPrevious when the content is shorter than the screen', () => {
+  it('asks for earlier chapters while there is no scroll at all (a short last chapter), until the page is filled', () => {
+    // Nothing to scroll: scrollY is 0, which is under two screens, so it keeps loading earlier chapters...
+    expect(shouldLoadPrevious(0, 800, 363)).toBe(true);
+    expect(shouldLoadPrevious(300, 800, 360)).toBe(true);
+    // ...and stops once two screens of earlier text are above the reader, or at the start of the book.
+    expect(shouldLoadPrevious(2 * 800, 800, 360)).toBe(false);
+    expect(shouldLoadPrevious(0, 800, 0)).toBe(false);
   });
 });

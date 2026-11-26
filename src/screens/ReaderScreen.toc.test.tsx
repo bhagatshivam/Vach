@@ -97,6 +97,8 @@ const pdfFile: LibraryFile = { name: 'doc.pdf', uri: 'content://x/doc.pdf', path
 const item = (id: string, title: string, chapterIndex: number, fragment?: string, depth = 0, children: TocItem[] = []): TocItem => ({ id, title, chapterIndex, fragment, depth, children });
 
 let scrollY = 0;
+// How tall each mocked chapter is; a test makes them enormous to put the last chapters far down a very tall page.
+let chapterHeight = 100;
 const scrollTo = vi.fn();
 const originalRect = Element.prototype.getBoundingClientRect;
 
@@ -120,6 +122,7 @@ beforeEach(() => {
   store.pdf = null;
   __resetForTests();
   scrollY = 0;
+  chapterHeight = 100;
   scrollTo.mockReset();
   scrollTo.mockImplementation((arg: ScrollToOptions | number) => {
     if (typeof arg === 'object' && typeof arg.top === 'number') scrollY = arg.top;
@@ -127,17 +130,24 @@ beforeEach(() => {
   Object.defineProperty(document, 'fonts', { value: { ready: Promise.resolve(), load: async () => [] }, configurable: true });
   Object.defineProperty(window, 'scrollY', { get: () => scrollY, configurable: true });
   window.scrollTo = scrollTo as unknown as typeof window.scrollTo;
-  window.scrollBy = vi.fn() as unknown as typeof window.scrollBy;
+  // Compensating for chapters prepended above the reader moves the scroll position, as in a browser.
+  window.scrollBy = vi.fn((arg: ScrollToOptions | number) => {
+    if (typeof arg === 'object' && typeof arg.top === 'number') scrollY += arg.top;
+  }) as unknown as typeof window.scrollBy;
   // Chapter i is 100px tall and starts at i * 100 (minus the scroll); an anchor element sits 40px into its chapter.
   Element.prototype.getBoundingClientRect = function (this: Element) {
     const rect = (top: number, height: number) => ({ top, bottom: top + height, left: 0, right: 360, width: 360, height, x: 0, y: top, toJSON: () => ({}) });
     const chapter = this.classList.contains('chapter') ? this : this.closest('.chapter');
     if (chapter) {
-      // Which chapter this is comes from its text ("chapter 4", "page 5"), so it stays right when earlier chapters are prepended.
-      const match = /(?:chapter|body|Heading) (\d+)|page (\d+)/.exec(chapter.textContent ?? '');
-      const index = match ? (match[1] !== undefined ? Number(match[1]) : Number(match[2]) - 1) : 0;
-      const top = index * 100 - scrollY + (this.hasAttribute('data-vach-anchor') ? 40 : 0);
-      return rect(top, this === chapter ? 100 : this.hasAttribute('data-vach-anchor') ? 20 : 100);
+      // Which chapter this is comes from its text ("chapter 4", "page 5"), so it stays right when earlier chapters are
+      // prepended. Chapters stack from the first one mounted, like the real page.
+      const indexOf = (el: Element) => {
+        const match = /(?:chapter|body|Heading) (\d+)|page (\d+)/.exec(el.textContent ?? '');
+        return match ? (match[1] !== undefined ? Number(match[1]) : Number(match[2]) - 1) : 0;
+      };
+      const firstMounted = indexOf(chapter.parentElement!.querySelector(':scope > .chapter')!);
+      const top = (indexOf(chapter) - firstMounted) * chapterHeight - scrollY + (this.hasAttribute('data-vach-anchor') ? 40 : 0);
+      return rect(top, this === chapter ? chapterHeight : this.hasAttribute('data-vach-anchor') ? 20 : chapterHeight);
     }
     return rect(0, 0);
   };
@@ -261,6 +271,79 @@ describe('ReaderScreen - jumping outside the mounted window (EPUB)', () => {
   });
 });
 
+describe('ReaderScreen - a chapter far down a very tall page (the last chapters of a long book)', () => {
+  // Chromium paints nothing past ~2^23 px of scroll offset, and every chapter after the reader's position stays
+  // mounted, so the last chapters of a long book can sit there. A jump must not land in that zone: it reopens the
+  // window at the chapter, which puts it near the top of a short page.
+
+  it('a mounted chapter lower than the paintable limit is not scrolled to: the window is reopened at it', async () => {
+    chapterHeight = 500_000; // chapter 5 starts 2.5M px down
+    await openEpubReader({ toc: LONG_TOC });
+    await waitFor(() => expect(document.querySelectorAll('.reader-content .chapter')).toHaveLength(6)); // the whole book is mounted
+    scrollTo.mockClear();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Contents' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Epilogue' }));
+
+    await waitFor(() => expect(store.streamStarts).toEqual([0, 4])); // chapter 5, one chapter of context
+    expect(scrollTo).not.toHaveBeenCalledWith(expect.objectContaining({ top: 2_500_000 }));
+    expect(store.openCount).toBe(2);
+    // The reopened window holds the target and starts right before it - not the whole book.
+    await waitFor(() => expect(document.querySelectorAll('.reader-content:not(.pre-reveal) .chapter')).toHaveLength(2));
+    expect(Math.min(...store.yielded[1])).toBe(4);
+    await waitFor(() => {
+      const saved = [...store.prefs.entries()].find(([k]) => k.startsWith('reading_position:'));
+      expect(saved && JSON.parse(saved[1]).anchor.chapterIndex).toBe(5);
+    }, { timeout: 4000 });
+  });
+
+  it('a chapter within the limit is still just scrolled to (no reopening)', async () => {
+    chapterHeight = 500_000; // chapter 2 starts 1M px down
+    await openEpubReader({ toc: LONG_TOC });
+    await waitFor(() => expect(document.querySelectorAll('.reader-content .chapter')).toHaveLength(6));
+    scrollTo.mockClear();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Contents' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Chapter Two' }));
+
+    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: 1_000_000 })));
+    expect(store.openCount).toBe(1);
+    expect(store.streamStarts).toEqual([0]);
+  });
+
+  it('jumping to the last chapter and then back to the first both end with the target mounted', async () => {
+    chapterHeight = 500_000;
+    await openEpubReader({ toc: LONG_TOC });
+    await waitFor(() => expect(document.querySelectorAll('.reader-content .chapter')).toHaveLength(6));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Contents' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Epilogue' }));
+    await waitFor(() => expect(document.querySelector('.reader-content:not(.pre-reveal)')?.textContent).toContain('chapter 5'));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Contents' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Prologue' }));
+    // Chapter 0 is not mounted in the window that starts at 4, so the window is reopened at it again.
+    await waitFor(() => expect(store.streamStarts.at(-1)).toBe(0));
+    await waitFor(() => expect(document.querySelector('.reader-content:not(.pre-reveal)')?.textContent).toContain('chapter 0'));
+  });
+});
+
+describe('ReaderScreen - the last chapter is short or the only one', () => {
+  it('a saved position in the (short) last chapter restores with that chapter mounted and revealed', async () => {
+    await openEpubReader({ toc: LONG_TOC, savedChapter: 5 });
+    expect(store.streamStarts).toEqual([4]);
+    expect(document.querySelector('.reader-content:not(.pre-reveal)')?.textContent).toContain('chapter 5');
+    expect(document.querySelector('.restore-overlay')).toBeNull();
+  });
+
+  it('a one-chapter book opens, shows its chapter and has no Contents button', async () => {
+    store.chapterCount = 1;
+    await openEpubReader({ toc: [item('only', 'Only', 0)] });
+    expect(document.querySelector('.reader-content:not(.pre-reveal)')?.textContent).toContain('chapter 0');
+    expect(screen.queryByRole('button', { name: 'Contents' })).toBeNull();
+  });
+});
+
 describe('ReaderScreen - hardware Back and tapping outside', () => {
   it('Back closes the drawer first and does not leave the book; the hook is cleared afterwards', async () => {
     const onBack = vi.fn();
@@ -304,6 +387,16 @@ describe('ReaderScreen - a PDF with an outline', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Contents' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Part One' }));
     await waitFor(() => expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: 100 })));
+    expect(screen.queryByText(/Getting to/)).toBeNull();
+  });
+
+  it('the last page is jumped to when it has already been extracted (a PDF never reopens a window)', async () => {
+    await openPdfReader(99);
+    await waitFor(() => expect(document.querySelectorAll('.reader-content .chapter')).toHaveLength(8));
+    chapterHeight = 500_000; // even a very tall PDF page stack is only ever scrolled
+    fireEvent.click(await screen.findByRole('button', { name: 'Contents' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Part Two' }));
+    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: 3_500_000 })));
     expect(screen.queryByText(/Getting to/)).toBeNull();
   });
 

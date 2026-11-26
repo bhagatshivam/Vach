@@ -42,6 +42,25 @@ export function toAbsoluteAnchor(domAnchor: Anchor, firstChapterIndex: number): 
   return { ...domAnchor, chapterIndex: domAnchor.chapterIndex + firstChapterIndex };
 }
 
+/**
+ * How far down the page, in CSS px, a Contents jump may scroll within the
+ * chapters that are already mounted. Chromium stops painting past about 2^23 px
+ * (8.4 million) of scroll offset - the DOM and the geometry still say the text
+ * is there, but the screen is blank and stays blank while scrolling near it -
+ * and a phone's GPU path may give up earlier. All the chapters after the
+ * reader's position are kept mounted, so a long book is a very tall page, and
+ * its last chapters sit at the very bottom of it. A chapter lower than this is
+ * not scrolled to: the window is reopened at it instead, which puts it near the
+ * top of a short page. 2 million px is about 200 screens of text on a phone,
+ * more than most novels, and leaves a wide margin below any limit.
+ */
+export const MAX_DIRECT_JUMP_OFFSET_PX = 2_000_000;
+
+/** Is a chapter whose top is `topPx` down the page safe to scroll to directly? */
+export function canScrollWithinWindow(topPx: number | null): boolean {
+  return topPx !== null && Number.isFinite(topPx) && topPx >= 0 && topPx <= MAX_DIRECT_JUMP_OFFSET_PX;
+}
+
 /** Whether the chapter before the first mounted one should be loaded now. */
 export function shouldLoadPrevious(scrollY: number, viewportHeight: number, firstChapterIndex: number): boolean {
   return firstChapterIndex > 0 && scrollY < PREPEND_TRIGGER_VIEWPORTS * viewportHeight;
