@@ -24,6 +24,11 @@ export const ChapterSection = memo(function ChapterSection({ index, html }: Chap
   // the image controller. Each measures/processes only what is near the
   // viewport and ignores chapters with nothing for it. (Registering is an
   // effect on the DOM node, not a render: a chapter still renders exactly once.)
+  // Only a window of the book is mounted (mountWindow.ts), so a chapter that is
+  // unmounted runs the cleanup below: the table adapter forgets its tables, the
+  // image controller stops watching its pictures and lets go of them (the store
+  // revokes the blob: URLs nobody else is showing). A chapter that comes back
+  // mounts as new and is registered afresh.
   useEffect(() => {
     const section = sectionRef.current;
     if (!section) return;

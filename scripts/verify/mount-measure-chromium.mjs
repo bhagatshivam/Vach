@@ -35,7 +35,7 @@ try {
   console.log('SKIPPED: Playwright is not installed here, so there is no headless Chromium to measure with.');
   process.exit(0);
 }
-const { tallEpub, ordinaryEpub } = await import('./syntheticBooks.mjs');
+const { tallEpub, ordinaryEpub, epub, LOREM } = await import('./syntheticBooks.mjs');
 
 const label = opt('--label', 'run');
 const only = (opt('--only', 'tall,ordinary,docx,pdf') ?? '').split(',').filter(Boolean);
@@ -71,6 +71,12 @@ const SCENARIOS = {
   ordinary: { title: 'EPUB, 365 ordinary chapters (Les Miserables-sized)', file: 'ordinary.epub', inject: async () => ({ __sampleEpub: await ordinaryEpub(365) }) },
   docx: { title: 'DOCX, 100,000 words', file: 'words.docx', inject: async () => ({ __sampleDocx: readFileSync(docxPath).toString('base64') }) },
   pdf: { title: 'PDF, 3,000 dense text pages', file: 'big.pdf', inject: async () => ({ __syntheticPdf: { pages: 3000 } }) },
+  pictures: {
+    title: 'EPUB, 120 chapters each with its own big picture, 40 with a table, read slowly',
+    file: 'pictures.epub',
+    slowRead: true,
+    inject: async () => ({ __sampleEpub: await epub(Array.from({ length: 120 }, (_, i) => ({ title: `Chapter ${i + 1}`, paragraphs: 5, text: LOREM.repeat(2), uniqueImage: true, table: i % 3 === 0 })), { title: 'Pictures and tables' }) }),
+  },
   'pdf-4500': { title: 'PDF, 4,500 dense text pages', file: 'huge.pdf', inject: async () => ({ __syntheticPdf: { pages: 4500 } }) },
   'pdf-scanned': { title: 'PDF, 20,000 scanned pages', file: 'scans.pdf', inject: async () => ({ __syntheticPdf: { pages: 20000, scanned: true } }) },
 };
@@ -200,7 +206,23 @@ async function measure(key) {
   };
   console.log('traverse', JSON.stringify(result.traverse));
 
-  Object.assign(result, { heapAfterMB: (await heap(cdp)).heapMB, errors: errors.slice(0, 3) });
+  // A book with pictures is also READ, slowly enough for each picture to be downscaled as it comes near: how many blob: URLs
+  // (downscaled pictures) the book holds at the most, and what the heap is, after reading it through.
+  if (scenario.slowRead) {
+    await page.evaluate(() => window.scrollTo(0, 0));
+    let peak = 0;
+    for (let i = 0; i < 200; i++) {
+      const stats = await page.evaluate(() => window.mm.fling(1800, 120));
+      await page.waitForTimeout(160);
+      peak = Math.max(peak, await page.evaluate(() => window.__book?.images.liveUrlCount ?? 0));
+      if (stats.reachedEnd) break;
+    }
+    result.blobUrlsPeak = peak;
+    await page.waitForTimeout(2500);
+  }
+  // Pictures downscaled and shown while reading: how many blob: URLs the book still holds now, and how many <img> are mounted.
+  const held = await page.evaluate(() => ({ blobUrls: window.__book?.images.liveUrlCount ?? null, imgs: document.querySelectorAll('.reader-content img').length }));
+  Object.assign(result, { heapAfterMB: (await heap(cdp)).heapMB, blobUrlsAfter: held.blobUrls, imgsAfter: held.imgs, errors: errors.slice(0, 3) });
   await page.close();
   return result;
 }
@@ -258,6 +280,7 @@ function comparisonTable(before, after) {
       line(['largest page height seen while flinging', m(b.fling.maxPageHeight), m(a.fling.maxPageHeight)]),
       line(['JS heap after open', `${b.heapMB} MB`, `${a.heapMB} MB`]),
       line(['JS heap after the traverse', `${b.heapAfterMB} MB`, `${a.heapAfterMB} MB`]),
+      ...(b.blobUrlsPeak !== undefined ? [line(['blob: URLs alive: at most while reading / at the end (<img> mounted at the end)', `${b.blobUrlsPeak} / ${b.blobUrlsAfter} (${b.imgsAfter})`, `${a.blobUrlsPeak} / ${a.blobUrlsAfter} (${a.imgsAfter})`])] : []),
       line(['time to first text', `${b.firstTextMs} ms`, `${a.firstTextMs} ms`]),
       line(['fling frame gaps: max / median p95 / over 50 ms', `${b.fling.maxGapMs} / ${b.fling.medianP95GapMs} ms / ${b.fling.gapsOver50}`, `${a.fling.maxGapMs} / ${a.fling.medianP95GapMs} ms / ${a.fling.gapsOver50}`]),
       line(['fling: frames stalled waiting for more content', b.fling.stalls, a.fling.stalls]),

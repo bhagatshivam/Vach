@@ -1,7 +1,7 @@
 // Synthetic books for the headless-Chromium reader checks (nothing here ships in the app). Deterministic: the same
 // arguments give the same bytes.
 //
-//   epub(chapters)   chapters: [{ title, paragraphs?, text?, short?, table?, wideTable?, image?: 'a' | 'b' }]
+//   epub(chapters)   chapters: [{ title, paragraphs?, text?, short?, table?, wideTable?, image?: 'a' | 'b', uniqueImage? }]
 //   tallEpub()       the 10.5M px book from the PR #12 harness: 150 chapters of 15 long paragraphs
 //   ordinaryEpub(n)  a Les Miserables-sized book: n chapters of 8-14 ordinary paragraphs
 //
@@ -36,13 +36,19 @@ export async function epub(chapters, { title = 'Synthetic' } = {}) {
     manifest.push(`<item id="img-${kind}" href="img-${kind}.png" media-type="image/png"/>`);
     add(`OEBPS/img-${kind}.png`, picture(kind), 'STORE');
   }
+  // `uniqueImage`: a picture of its own for the chapter, bigger than a phone screen so that it is downscaled when read.
+  chapters.forEach((chapter, i) => {
+    if (!chapter.uniqueImage) return;
+    manifest.push(`<item id="u${i}" href="u${i}.png" media-type="image/png"/>`);
+    add(`OEBPS/u${i}.png`, png(1800, 1200, () => [(i * 37) % 256, (i * 91) % 256, (i * 53) % 256]), 'STORE');
+  });
   const spine = [];
   const toc = [];
   chapters.forEach((chapter, i) => {
     manifest.push(`<item id="c${i}" href="c${i}.xhtml" media-type="application/xhtml+xml"/>`);
     spine.push(`<itemref idref="c${i}"/>`);
     toc.push(`<li><a href="c${i}.xhtml">${chapter.title}</a></li>`);
-    const image = chapter.image ? `<p><img alt="Picture ${i}" src="img-${chapter.image}.png"/></p>` : '';
+    const image = chapter.uniqueImage ? `<p><img alt="Picture ${i}" src="u${i}.png"/></p>` : chapter.image ? `<p><img alt="Picture ${i}" src="img-${chapter.image}.png"/></p>` : '';
     const table = chapter.table
       ? `<table><thead><tr><th>Name</th><th>Year</th><th>Place</th><th>Notes</th></tr></thead><tbody>${Array.from({ length: 6 }, (_, r) => `<tr><td>Row ${r} of chapter ${i}</td><td>${1800 + r}</td><td>Somewhere</td><td>${LOREM.slice(0, 60)}</td></tr>`).join('')}</tbody></table>`
       : '';
