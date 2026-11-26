@@ -157,11 +157,11 @@ it was first read (compared in Chromium: 0 px difference) and its tables are ada
 | ... page height as measured | 10.74M px | 0.37M px at open, growing as chapters render (the scroll height lies until they do) |
 | unbounded page, 3,000-page PDF: median p95 frame gap / gaps over 50 ms / traverse time | 17 ms / 6 / 73 s | **83 ms / 153 / 278 s** |
 | bounded window, ordinary EPUB: time to first text | 282 ms | 351 ms |
-| bounded window, 10.7M px EPUB, continuous traverse | 10.74M px, 0/72 blank | **stopped at 3.03M px**: the reader ran out of chapters |
+| bounded window, 10.7M px EPUB, continuous traverse | 10.74M px, 0 stalled frames, 0/72 blank | **ended at 3.03M px of 10.74M with 225 stalled frames**: the page kept running out of mounted chapters |
 
 It cuts layout cost on a huge page, which is why the unbounded 10.7M px book flings better with it, but it does not fix the paint limit, it makes the PDF page
 much slower, and it makes the heights the window policy relies on wrong (an off-screen chapter measures as its 1,500 px stand-in), which in the bounded window left the
-reader out of chapters. Once the page is bounded there is no layout cost left for it to save (flings were already at one frame). Not kept.
+reader repeatedly out of chapters. Once the page is bounded there is no layout cost left for it to save (flings were already at one frame). Not kept.
 
 ### PDF: not changed, and has the problem above about 4,250 text pages
 
