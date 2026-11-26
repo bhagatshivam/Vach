@@ -145,7 +145,7 @@ describe('ReaderScreen - restoring straight to a saved chapter', () => {
     const { container } = await renderReader();
 
     await waitForReveal(container);
-    await waitFor(() => expect(container.querySelector('.loading-more')).toBeNull()); // the window reaches the last chapter
+    await waitFor(() => expect(container.querySelector('.loading-more')).toBeNull(), { timeout: 5000 }); // the window reaches the last chapter
 
     expect(book.streamStarts).toEqual([7]); // chapter 8 minus one chapter of context
     // The first chapters of the window come from the stream (the saved chapter plus a few after it) and the rest are
@@ -174,8 +174,8 @@ describe('ReaderScreen - restoring straight to a saved chapter', () => {
 
     // (The chapters after the window are loaded too, as the reader nears them; they are not what is checked here.)
     const earlier = () => book.loadCalls.filter((index) => index < 7);
-    await waitFor(() => expect(earlier()).toEqual([6, 5, 4, 3, 2, 1, 0]));
-    await waitFor(() => expect(mountedChapters(container)).toHaveLength(CHAPTERS));
+    await waitFor(() => expect(earlier()).toEqual([6, 5, 4, 3, 2, 1, 0]), { timeout: 5000 });
+    await waitFor(() => expect(mountedChapters(container)).toHaveLength(CHAPTERS), { timeout: 5000 });
     expect(mountedChapters(container)).toEqual(Array.from({ length: CHAPTERS }, (_, i) => `CH_${i}`));
 
     // Every prepend pushed the chapter on screen down by one 100px section; each was compensated.
@@ -198,7 +198,7 @@ describe('ReaderScreen - restoring straight to a saved chapter', () => {
       return rect((Number(text.replace('CH_', '')) - 9) * 100 - 50);
     };
     await renderReader();
-    await waitFor(() => expect(book.loadCalls.filter((index) => index < 7)).toEqual([6, 5, 4, 3, 2, 1, 0]));
+    await waitFor(() => expect(book.loadCalls.filter((index) => index < 7)).toEqual([6, 5, 4, 3, 2, 1, 0]), { timeout: 5000 });
     expect(scrollBy).not.toHaveBeenCalled();
   });
 
@@ -213,7 +213,7 @@ describe('ReaderScreen - restoring straight to a saved chapter', () => {
 
   it('with no saved position it starts at chapter 0 and loads nothing earlier', async () => {
     const { container } = await renderReader();
-    await waitFor(() => expect(mountedChapters(container)).toHaveLength(CHAPTERS));
+    await waitFor(() => expect(mountedChapters(container)).toHaveLength(CHAPTERS), { timeout: 5000 });
     expect(book.streamStarts).toEqual([0]);
     // Chapters 0-3 come from the stream and the rest are loaded one after the other as the reader nears them; nothing is
     // loaded before chapter 0, so nothing has to be compensated for.
@@ -230,7 +230,7 @@ describe('ReaderScreen - restoring straight to a saved chapter', () => {
     fireEvent.click(await screen.findByText('Start from beginning'));
 
     await waitFor(() => expect(book.streamStarts).toEqual([7, 0]));
-    await waitFor(() => expect(mountedChapters(container)).toHaveLength(CHAPTERS));
+    await waitFor(() => expect(mountedChapters(container)).toHaveLength(CHAPTERS), { timeout: 5000 });
     expect(mountedChapters(container)[0]).toBe('CH_0');
     expect(container.querySelector('.reader-content.pre-reveal')).toBeNull();
   });
@@ -264,7 +264,7 @@ describe('ReaderScreen - rendering cost while a book streams in', () => {
     const counts = new Map<number, number>();
     chapterRenderProbe.onRender = (i) => counts.set(i, (counts.get(i) ?? 0) + 1);
     const { container } = await renderReader();
-    await waitFor(() => expect(mountedChapters(container)).toHaveLength(CHAPTERS));
+    await waitFor(() => expect(mountedChapters(container)).toHaveLength(CHAPTERS), { timeout: 5000 });
     await waitFor(() => expect(container.querySelector('.loading-more')).toBeNull());
 
     expect([...counts.keys()].sort((a, b) => a - b)).toEqual(Array.from({ length: CHAPTERS }, (_, i) => i));

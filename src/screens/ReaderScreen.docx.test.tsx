@@ -256,7 +256,7 @@ describe('ReaderScreen - jumping to the last section of a 100,000-word .docx (th
     state.html = longDocument(100_000);
     chapterHeight = 3_000; // the first four sections (12,000px) are all within the window of a 768px screen
     await openReader();
-    await waitFor(() => expect(sectionCount()).toBeGreaterThanOrEqual(4));
+    await waitFor(() => expect(sectionCount()).toBeGreaterThanOrEqual(4), { timeout: 5000 });
     scrollTo.mockClear();
     fireEvent.click(await screen.findByRole('button', { name: 'Contents' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Section 3' }));

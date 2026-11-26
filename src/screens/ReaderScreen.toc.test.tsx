@@ -167,6 +167,11 @@ async function openEpubReader(options: { toc?: TocItem[]; onBack?: () => void; s
   const { default: ReaderScreen } = await import('./ReaderScreen');
   const view = render(<ReaderScreen file={epubFile} onBack={options.onBack ?? (() => {})} overlayCloseRef={overlayCloseRef} />);
   await waitFor(() => expect(view.container.querySelector('.reader-content:not(.pre-reveal) .chapter')).not.toBeNull());
+  // Only the first few chapters are mounted at once and the window manager brings in the rest a frame at a time: a short
+  // book is whole once it has settled, and a jump to one of its chapters is then a plain scroll, not a reopen.
+  if (options.savedChapter === undefined && store.chapterCount <= 8 && chapterHeight <= 100) {
+    await waitFor(() => expect(view.container.querySelectorAll('.reader-content .chapter')).toHaveLength(store.chapterCount));
+  }
   return { view, overlayCloseRef };
 }
 
