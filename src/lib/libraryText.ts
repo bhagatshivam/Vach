@@ -1,9 +1,14 @@
-export type BookFormat = 'epub' | 'pdf';
+export type BookFormat = 'epub' | 'pdf' | 'docx';
 
 const EXTENSION_FORMATS: Record<string, BookFormat> = {
   epub: 'epub',
   pdf: 'pdf',
+  // Word documents (.docx only: the legacy binary .doc is a different format and stays unsupported).
+  docx: 'docx',
 };
+
+/** The MIME type Word documents carry; shown to the system file picker's callers for reference. The picker itself filters by extension (see LibraryFolderPlugin.kt). */
+export const DOCX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
 /**
  * Detects a book's format from its file name, case-insensitively (".EPUB",

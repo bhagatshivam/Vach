@@ -2,6 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProp
 import { App as CapacitorApp } from '@capacitor/app';
 import type { LibraryFile } from '../lib/libraryFolder';
 import { FileTooLargeError, createFileSource } from '../lib/fileBridge';
+import { DocxError } from '../lib/docxError';
+import { cleanTitle } from '../lib/libraryText';
 import type { EpubBook } from '../lib/epub';
 import { ChapterList } from '../components/ChapterList';
 import ImageLightbox, { type LightboxImage } from '../components/ImageLightbox';
@@ -32,7 +34,7 @@ import {
   type Anchor,
 } from '../lib/readerAnchor';
 import { ANCHOR_VERSION, anchorForRestore, loadPosition, markOpened, savePosition, type StoredPosition } from '../lib/readingPosition';
-import { ANCHOR_ATTR, flattenToc, weightedProgress, type TocItem } from '../lib/toc';
+import { ANCHOR_ATTR, LINK_ATTR, flattenToc, weightedProgress, type TocItem } from '../lib/toc';
 import {
   DEFAULT_READER_SETTINGS,
   isDarkTheme,
@@ -138,6 +140,13 @@ async function openBookStream(uri: string, fileName: string, signal: AbortSignal
     const { openPdf } = await import('../lib/pdf');
     const handle = await openPdf(source, fileName);
     return { pdfHandle: handle, epub: null, stream: () => handle.streamChapters() };
+  }
+  // A Word document is converted into virtual chapters and then behaves exactly like an EPUB (docx.ts). It is
+  // routed here explicitly: it must never reach the EPUB parser, which would fail on it.
+  if (fileName.toLowerCase().endsWith('.docx')) {
+    const { openDocxFile } = await import('../lib/docxFile');
+    const docx = await openDocxFile(uri, cleanTitle(fileName), { signal });
+    return { pdfHandle: null, epub: docx, stream: (startIndex) => docx.stream(startIndex) };
   }
   const { openEpubFile } = await import('../lib/epubFile');
   const epub = await openEpubFile(uri, fileName, { signal });
@@ -430,7 +439,7 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
         console.error('[ReaderScreen] load: failed', err);
         // FileTooLargeError's message is already a complete, user-facing
         // sentence; String(err) would prefix it with the class name.
-        setError(err instanceof FileTooLargeError ? err.message : String(err));
+        setError(err instanceof FileTooLargeError || err instanceof DocxError ? err.message : String(err));
         setStatus('Failed to open book.');
       }
     }
@@ -725,6 +734,15 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
     flushFresh();
   }
 
+  // Goes to where a tapped internal link points, by the same path as a Contents entry - so the same rules apply
+  // (scroll when the chapter is mounted and near, reopen the window at it when not). False if it points nowhere.
+  function followInternalLink(anchorId: string | null): boolean {
+    const target = anchorId ? epubRef.current?.resolveLink?.(anchorId) : null;
+    if (!target) return false;
+    jumpToTocItem({ id: `link:${anchorId}`, title: '', chapterIndex: target.chapterIndex, fragment: target.fragment, depth: 0, children: [] });
+    return true;
+  }
+
   function jumpToTocItem(item: TocItem) {
     setTocOpen(false);
     const current = bookRef.current;
@@ -966,6 +984,9 @@ export default function ReaderScreen({ file, onBack, overlayCloseRef }: ReaderSc
     }
     // A tap on a picture in the book opens it full screen instead of toggling the header.
     if (event.target instanceof HTMLImageElement && openImageInLightbox(event.target)) return;
+    // A tap on an internal link (a Word footnote, a cross-reference) jumps to what it points at.
+    const linkEl = event.target instanceof Element ? event.target.closest(`[${LINK_ATTR}]`) : null;
+    if (linkEl && followInternalLink(linkEl.getAttribute(LINK_ATTR))) return;
     setNavVisible((visible) => !visible);
   }
 

@@ -263,7 +263,7 @@ const ALLOWED_TAGS = [
 // vector for CSS-based tricks if that ever changes. style is kept but its
 // *value* is independently re-validated below - this list only controls
 // which attribute names can exist at all.
-const ALLOWED_ATTR = ['alt', 'src', 'width', 'height', 'colspan', 'rowspan', 'lang', 'dir', 'style', 'loading', 'decoding', 'data-vach-anchor'];
+const ALLOWED_ATTR = ['alt', 'src', 'width', 'height', 'colspan', 'rowspan', 'lang', 'dir', 'style', 'loading', 'decoding', 'data-vach-anchor', 'data-vach-link'];
 
 // Inline style: a short allowlist of structural properties only - nothing
 // that can paint, fetch, or navigate. Each property additionally has its
@@ -397,7 +397,7 @@ const DOMPURIFY_CONFIG = {
   // via a regression test that actually asserted colspan survived a real
   // sanitize() round trip. src is deliberately not in this list: it's the one
   // attribute that must keep going through the regexp check (and the hook).
-  ADD_URI_SAFE_ATTR: ['width', 'height', 'colspan', 'rowspan', 'lang', 'dir', 'loading', 'decoding', 'data-vach-anchor'],
+  ADD_URI_SAFE_ATTR: ['width', 'height', 'colspan', 'rowspan', 'lang', 'dir', 'loading', 'decoding', 'data-vach-anchor', 'data-vach-link'],
   ALLOW_DATA_ATTR: false,
   // Explicit on top of the allowlist default-deny, so the intent reads
   // clearly even though these are already absent from ALLOWED_TAGS: no
@@ -408,7 +408,7 @@ const DOMPURIFY_CONFIG = {
   FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'meta', 'link', 'base', 'style', 'svg'],
 };
 
-type ResolveImage = (resolvedHref: string) => Promise<RegisteredImage | null>;
+export type ResolveImage = (resolvedHref: string) => Promise<RegisteredImage | null>;
 
 const INLINE_TEXT_TAGS = new Set(['SPAN', 'EM', 'STRONG', 'I', 'B', 'U', 'S', 'SUB', 'SUP', 'SMALL', 'CODE', 'RUBY', 'RT', 'RP', 'DEL', 'INS', 'A']);
 
@@ -583,13 +583,21 @@ function keepAnchors(doc: Document): void {
   }
 }
 
-async function sanitizeChapterHtml(
+/**
+ * One chapter's untrusted markup -> the sanitized HTML the reader mounts: images resolved through the book's
+ * ImageStore (sized before mount), ids kept as inert anchors, then the default-deny allowlist. Used for EPUB
+ * chapters and, with `prepare`, for Word documents (docx.ts), whose own markup is just as untrusted.
+ * `prepare` may reshape the parsed document first (docx.ts turns internal links into tappable spans).
+ */
+export async function sanitizeChapterHtml(
   rawHtml: string,
   chapterDir: string,
   resolveImage: ResolveImage,
   registerInline: (bytes: Uint8Array, mediaType: string, key: string) => RegisteredImage,
+  prepare?: (doc: Document) => void,
 ): Promise<string> {
   const doc = new DOMParser().parseFromString(rawHtml, 'text/html');
+  prepare?.(doc);
 
   await convertSvgImagesToImg(doc, chapterDir, resolveImage);
   await resolveImgSrcs(doc, chapterDir, resolveImage, registerInline);
@@ -691,6 +699,11 @@ export interface EpubBook {
    * archive cannot say.
    */
   chapterWeights: readonly number[] | null;
+  /**
+   * Where an internal link's target lives (a Word document's footnote, a cross-reference): the chapter and the
+   * anchor in it. Only books whose links are tappable provide it; an EPUB's links are not (yet).
+   */
+  resolveLink?(anchorId: string): { chapterIndex: number; fragment: string } | null;
   /** The book's images: sizes, background downscaling, full-detail decoding for the lightbox. */
   images: ImageStore;
   /** Releases everything the book holds (every blob: URL). Call when the book closes. */

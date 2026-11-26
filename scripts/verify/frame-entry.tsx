@@ -14,7 +14,7 @@ let root: Root | null = null;
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 const api = {
-  async show(screen: 'library-empty' | 'library-books' | 'reader', settings: object, insets: { top: number; bottom: number; left: number; right: number } | null, savedChapter?: number) {
+  async show(screen: 'library-empty' | 'library-books' | 'reader', settings: object, insets: { top: number; bottom: number; left: number; right: number } | null, savedChapter?: number, fileName = 'sample.epub') {
     root?.unmount();
     document.body.innerHTML = '<div id="root"></div>';
     document.documentElement.removeAttribute('style');
@@ -32,12 +32,12 @@ const api = {
       s.setProperty('--safe-area-inset-right', `${insets.right}px`);
     }
     // A reader coming back to a book: open it at a saved position (this is what the real app does on a reopen).
-    if (savedChapter !== undefined) await savePosition({ name: 'sample.epub', size: 1 }, { chapterIndex: savedChapter, blockIndex: 2, blockFraction: 0.3 }, 0.4);
+    if (savedChapter !== undefined) await savePosition({ name: fileName, size: 1 }, { chapterIndex: savedChapter, blockIndex: 2, blockFraction: 0.3 }, 0.4);
     (window as unknown as { __libraryMode: string }).__libraryMode = screen === 'library-books' ? 'books' : 'empty';
     root = createRoot(document.getElementById('root')!);
     const ref = createRef<(() => void) | null>() as { current: (() => void) | null };
     if (screen === 'reader') {
-      root.render(<ReaderScreen file={{ name: 'sample.epub', uri: 'content://x/sample.epub', path: 'sample.epub', size: 1 }} onBack={() => {}} />);
+      root.render(<ReaderScreen file={{ name: fileName, uri: `content://x/${fileName}`, path: fileName, size: 1 }} onBack={() => {}} />);
       for (let i = 0; i < 200 && !document.querySelector('.reader-content:not(.pre-reveal) .chapter'); i++) await sleep(50);
     } else {
       root.render(<LibraryScreen onOpenBook={() => {}} sheetCloseRef={ref} />);
@@ -90,7 +90,13 @@ const api = {
    */
   async jumpTo(title: string) {
     if (!document.querySelector('.toc-panel')) await api.openToc();
-    const entry = Array.from(document.querySelectorAll<HTMLButtonElement>('.toc-item')).find((b) => b.textContent === title);
+    const find = () => Array.from(document.querySelectorAll<HTMLButtonElement>('.toc-item')).find((b) => b.textContent === title);
+    // A deeply nested book starts with its groups collapsed: open them all if the entry is not showing.
+    if (!find()) {
+      document.querySelectorAll<HTMLButtonElement>('.toc-toggle[aria-expanded="false"]').forEach((b) => b.click());
+      await sleep(100);
+    }
+    const entry = find();
     if (!entry) return { error: `no Contents entry "${title}"` };
     entry.scrollIntoView({ block: 'center' });
     entry.click();
@@ -111,7 +117,7 @@ const api = {
     const visible = chapters
       .map((el) => ({ el, rect: el.getBoundingClientRect() }))
       .filter(({ rect }) => rect.height > 0 && rect.bottom > 1 && rect.top < vh - 1)
-      .map(({ el, rect }) => ({ marker: /MARK_(\d+)/.exec(el.textContent ?? '')?.[1] ?? '?', top: Math.round(rect.top), bottom: Math.round(rect.bottom) }));
+      .map(({ el, rect }) => ({ marker: /MARK_(\d+)/.exec(el.textContent ?? '')?.[1] ?? '?', text: (el.textContent ?? '').slice(0, 40), top: Math.round(rect.top), bottom: Math.round(rect.bottom) }));
     const covered = visible.reduce((n, v) => n + Math.max(0, Math.min(v.bottom, vh) - Math.max(v.top, 0)), 0);
     const marks = chapters.map((el) => Number(/MARK_(\d+)/.exec(el.textContent ?? '')?.[1] ?? -1));
     return {
@@ -127,6 +133,59 @@ const api = {
       drawer: Boolean(document.querySelector('.toc-panel')),
       loadingMore: Boolean(document.querySelector('.loading-more')),
     };
+  },
+
+  /** Taps an internal link (a Word footnote number, a cross-reference) by the id it points to, and waits for the jump. */
+  async clickLink(id: string) {
+    const link = document.querySelector<HTMLElement>(`[data-vach-link="${id}"]`);
+    if (!link) return { error: `no link to "${id}" is mounted` };
+    link.click();
+    for (let i = 0; i < 300; i++) {
+      await sleep(50);
+      const settled = !document.querySelector('.restore-overlay') && document.querySelector('.reader-content:not(.pre-reveal)');
+      if (settled && i > 6) break;
+    }
+    await sleep(700);
+    return api.anchorInView(id);
+  },
+
+  /** Where the element carrying anchor `id` is relative to the screen. */
+  anchorInView(id: string) {
+    const el = Array.from(document.querySelectorAll<HTMLElement>('[data-vach-anchor]')).find((e) => e.getAttribute('data-vach-anchor') === id);
+    if (!el) return { found: false as const };
+    const rect = el.getBoundingClientRect();
+    return { found: true as const, top: Math.round(rect.top), bottom: Math.round(rect.bottom), inView: rect.bottom > 0 && rect.top < window.innerHeight, innerHeight: window.innerHeight };
+  },
+
+  /** Scrolls through the whole book so every chapter has been near the screen (tables adapt, images load), then back to the top. */
+  async scrollThrough() {
+    const total = document.documentElement.scrollHeight;
+    for (let y = 0; y <= total; y += Math.max(200, window.innerHeight / 2)) {
+      window.scrollTo(0, y);
+      await sleep(40);
+    }
+    window.scrollTo(0, 0);
+    await sleep(300);
+  },
+
+  /** What the tables look like now, and the pictures. */
+  contentFacts() {
+    const content = document.querySelector<HTMLElement>('.reader-content')!;
+    const tables = Array.from(content.querySelectorAll('table')).map((t) => ({ mode: t.getAttribute('data-vach-mode'), cols: t.rows[0]?.cells.length ?? 0, spans: t.querySelectorAll('[colspan],[rowspan]').length }));
+    const images = Array.from(content.querySelectorAll('img')).map((img) => ({ width: img.getAttribute('width'), height: img.getAttribute('height'), aspect: img.style.aspectRatio, loading: img.getAttribute('loading'), natural: [img.naturalWidth, img.naturalHeight], src: (img.getAttribute('src') ?? '').slice(0, 5) }));
+    const overflow = document.documentElement.scrollWidth - window.innerWidth;
+    return { tables, images, overflow, title: document.querySelector('.reader-title')?.textContent ?? null, links: content.querySelectorAll('[data-vach-link]').length, anchors: content.querySelectorAll('[data-vach-anchor]').length };
+  },
+
+  /** Taps the first picture in the page. */
+  async tapImage() {
+    const img = document.querySelector<HTMLImageElement>('.reader-content img');
+    if (!img) return false;
+    img.scrollIntoView({ block: 'center' });
+    await sleep(200);
+    img.click();
+    await sleep(500);
+    return Boolean(document.querySelector('.lightbox'));
   },
 
   measure() {
