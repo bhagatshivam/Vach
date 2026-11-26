@@ -408,6 +408,11 @@
   color: var(--danger);
 }
 
+.fmt-badge.docx {
+  background: rgba(37, 99, 235, 0.16);
+  color: #2563eb;
+}
+
 .book-main {
   flex: 1;
   min-width: 0;
@@ -782,6 +787,15 @@
    The explicit inline width is what sizes the box; `width: auto` below is only
    the fallback for an image whose size could not be read. PDF page images
    (.pdf-page-img) have their own rules further down and are left out here. */
+.reader-content [data-vach-link] {
+  /* An internal link in a Word document (a footnote number, a cross-reference): tapping it jumps to its target. */
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  cursor: pointer;
+  padding: 0.25em 0.2em;
+  margin: -0.25em -0.2em;
+}
+
 .reader-content img:not(.pdf-page-img) {
   max-width: 100%;
   width: auto;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cleanTitle, detectFormat, matchesQuery } from './libraryText';
+import { DOCX_MIME_TYPE, cleanTitle, detectFormat, matchesQuery } from './libraryText';
 
 describe('cleanTitle', () => {
   it('strips the extension', () => {
@@ -76,5 +76,24 @@ describe('matchesQuery', () => {
   it('treats an empty or whitespace-only query as matching everything', () => {
     expect(matchesQuery('Anything at all', '')).toBe(true);
     expect(matchesQuery('Anything at all', '   ')).toBe(true);
+  });
+});
+
+describe('.docx in the library', () => {
+  it('is recognised in any case; the legacy binary .doc is not', () => {
+    expect(detectFormat('Report.docx')).toBe('docx');
+    expect(detectFormat('REPORT.DOCX')).toBe('docx');
+    expect(detectFormat('notes.v2.Docx')).toBe('docx');
+    expect(detectFormat('old.doc')).toBeNull();
+    expect(detectFormat('docx')).toBeNull();
+    expect(detectFormat('a.docx.txt')).toBeNull();
+    expect(detectFormat('a.docm')).toBeNull();
+    expect(detectFormat('a.epub')).toBe('epub');
+    expect(detectFormat('a.pdf')).toBe('pdf');
+    expect(DOCX_MIME_TYPE).toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+  });
+
+  it('the title strips the extension like any other', () => {
+    expect(cleanTitle('Meeting_Notes_2026.docx')).toBe('Meeting Notes 2026');
   });
 });

@@ -297,7 +297,7 @@ export default function LibraryScreen({ onOpenBook, sheetCloseRef }: LibraryScre
               &#128214;
             </div>
             <h2>Your library is empty</h2>
-            <p>Add a folder of EPUB or PDF files, or just a few files, from your device to start reading. Nothing leaves your phone.</p>
+            <p>Add a folder of EPUB, PDF or Word (.docx) files, or just a few files, from your device to start reading. Nothing leaves your phone.</p>
             <div className="empty-actions">
               <button className="primary-btn" onClick={handleAddFolder}>
                 + Add folder
@@ -352,7 +352,7 @@ export default function LibraryScreen({ onOpenBook, sheetCloseRef }: LibraryScre
 
             {visibleFiles.length === 0 && !scanning ? (
               <p className="empty">
-                {debouncedQuery ? <>No books match &quot;{debouncedQuery}&quot;.</> : 'No .pdf or .epub files found in the added sources.'}
+                {debouncedQuery ? <>No books match &quot;{debouncedQuery}&quot;.</> : 'No .pdf, .epub or .docx files found in the added sources.'}
               </p>
             ) : (
               <ul className="book-list">

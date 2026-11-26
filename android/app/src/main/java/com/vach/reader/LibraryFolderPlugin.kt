@@ -21,7 +21,8 @@ import com.getcapacitor.annotation.ActivityCallback
 import com.getcapacitor.annotation.CapacitorPlugin
 
 private const val TAG = "LibraryFolderPlugin"
-private val SUPPORTED_EXTENSIONS = setOf("pdf", "epub")
+// "docx" is the Word format (OOXML); the legacy binary ".doc" is deliberately not listed.
+private val SUPPORTED_EXTENSIONS = setOf("pdf", "epub", "docx")
 
 // Upper bound on one readChunk() call, enforced natively so a buggy or
 // hostile caller can't ask for an arbitrarily large slice. 4 MiB because
@@ -177,8 +178,10 @@ class LibraryFolderPlugin : Plugin() {
         Log.d(TAG, "pickFiles() called from JS")
 
         // Broad type + EXTRA_MIME_TYPES isn't used here: many file managers/cloud
-        // providers don't tag .epub as application/epub+zip, so a strict MIME
-        // filter risks hiding legitimate files from the picker. Accept anything
+        // providers don't tag .epub as application/epub+zip (nor .docx as
+        // application/vnd.openxmlformats-officedocument.wordprocessingml.document),
+        // so a strict MIME filter risks hiding legitimate files from the
+        // picker. Accept anything
         // openable and filter by extension on the results instead, consistent
         // with how folder scanning already filters (see collectLibraryFiles).
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {

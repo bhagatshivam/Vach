@@ -14,6 +14,12 @@
  */
 export const ANCHOR_ATTR = 'data-vach-anchor';
 
+/**
+ * The attribute an internal link (a Word footnote or cross-reference) carries in a mounted chapter: the id it points
+ * to. A tap on such an element jumps to that id's chapter and anchor (the book's resolveLink).
+ */
+export const LINK_ATTR = 'data-vach-link';
+
 export interface TocItem {
   /** Unique within one book's TOC (document order), for React keys and expand state. */
   id: string;
