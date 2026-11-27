@@ -173,11 +173,13 @@ async function measure(key) {
   let allTextMs = null;
   const limit = Number(process.env.ALL_TEXT_LIMIT_S ?? 600) * 1000;
   while (book.pdf && Date.now() - t0 < limit) {
-    const loading = await page.evaluate(() => Boolean(document.querySelector('.loading-more')));
+    const { loading, mounted } = await page.evaluate(() => ({ loading: Boolean(document.querySelector('.loading-more')), mounted: document.querySelectorAll('.reader-content > .chapter').length }));
     if (!loading) {
       allTextMs = Date.now() - t0;
       break;
     }
+    // A reader that mounts only a window of the book shows "Loading more..." until the window reaches the end: it never extracts everything.
+    if (Date.now() - t0 > 8000 && mounted < 60) break;
     await page.waitForTimeout(250);
   }
   r.allTextMs = allTextMs; // null: not everything after the limit (or never, when the reader only extracts what it needs); an EPUB is never waited for
