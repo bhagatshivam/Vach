@@ -25,7 +25,11 @@ function pageNumberOf(el: Element): number | null {
 }
 
 export interface PdfPageLoaderOptions {
-  container: HTMLElement;
+  /**
+   * Only needed for scan(): where the page placeholders are looked for. A reader that registers each chapter as it mounts
+   * (register()) does not need one.
+   */
+  container?: HTMLElement;
   renderPageImage: (pageNumber: number, viewportWidthPx: number, devicePixelRatio: number) => PendingPdfRender;
   maxConcurrent?: number;
 }
@@ -38,7 +42,7 @@ export interface PdfPageLoaderOptions {
  * unmount, to disconnect both observers and cancel any in-flight renders.
  */
 export class PdfPageLoader {
-  private readonly container: HTMLElement;
+  private readonly container: HTMLElement | null;
   private readonly renderPageImage: PdfPageLoaderOptions['renderPageImage'];
   private readonly maxConcurrent: number;
   private readonly renderObserver: IntersectionObserver;
@@ -46,7 +50,10 @@ export class PdfPageLoader {
   private readonly state = new Map<number, PageState>();
   private readonly inFlight = new Map<number, PendingPdfRender>();
   private readonly pendingQueue = new Set<number>();
+  /** The placeholder element of each page that is registered (mounted), by page number. */
+  private readonly figures = new Map<number, HTMLElement>();
   private destroyed = false;
+  private paused = false;
   // The last top-level <section class="chapter"> this.scan() has already
   // processed - lets each call resume from there via sibling traversal
   // instead of re-querying the whole (ever-growing) container every time.
@@ -54,7 +61,7 @@ export class PdfPageLoader {
   private lastScannedChapter: Element | null = null;
 
   constructor(options: PdfPageLoaderOptions) {
-    this.container = options.container;
+    this.container = options.container ?? null;
     this.renderPageImage = options.renderPageImage;
     this.maxConcurrent = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
 
@@ -89,23 +96,69 @@ export class PdfPageLoader {
    * (present, then removed, without disturbing chapter sibling order).
    */
   scan(): void {
-    if (this.destroyed) return;
+    if (this.destroyed || !this.container) return;
     let current: Element | null = this.lastScannedChapter
       ? this.lastScannedChapter.nextElementSibling
       : this.container.firstElementChild;
 
     while (current && current.classList.contains('chapter')) {
-      const figures = current.querySelectorAll<HTMLElement>('figure.pdf-page');
-      for (const figure of Array.from(figures)) {
-        const pageNumber = pageNumberOf(figure);
-        if (pageNumber === null) continue;
-        this.state.set(pageNumber, 'unrendered');
-        this.renderObserver.observe(figure);
-        this.evictObserver.observe(figure);
-      }
+      this.observeSection(current);
       this.lastScannedChapter = current;
       current = current.nextElementSibling;
     }
+  }
+
+  /**
+   * Starts watching the page placeholders of one mounted chapter. Returns the function that stops, for when the chapter
+   * unmounts: the placeholders are no longer watched, a render in flight for them is cancelled, and everything known about
+   * their pages is forgotten (the page comes back as a new element if the chapter is mounted again).
+   */
+  register(section: Element): () => void {
+    if (this.destroyed) return () => {};
+    const mine = this.observeSection(section);
+    return () => {
+      for (const figure of mine) this.forgetFigure(figure);
+    };
+  }
+
+  /**
+   * Holds back every render until resume(): while the reader is still being put at its saved place the pages near the top
+   * of the page are not the ones that will be read, and rasterizing them would be work thrown away.
+   */
+  pause(): void {
+    this.paused = true;
+  }
+
+  resume(): void {
+    this.paused = false;
+    this.pump();
+  }
+
+  private observeSection(section: Element): HTMLElement[] {
+    const mine: HTMLElement[] = [];
+    for (const figure of Array.from(section.querySelectorAll<HTMLElement>('figure.pdf-page'))) {
+      const pageNumber = pageNumberOf(figure);
+      if (pageNumber === null || this.figures.get(pageNumber) === figure) continue;
+      this.state.set(pageNumber, 'unrendered');
+      this.figures.set(pageNumber, figure);
+      this.renderObserver.observe(figure);
+      this.evictObserver.observe(figure);
+      mine.push(figure);
+    }
+    return mine;
+  }
+
+  private forgetFigure(figure: HTMLElement): void {
+    this.renderObserver.unobserve(figure);
+    this.evictObserver.unobserve(figure);
+    const pageNumber = pageNumberOf(figure);
+    if (pageNumber === null || this.figures.get(pageNumber) !== figure) return;
+    this.figures.delete(pageNumber);
+    this.inFlight.get(pageNumber)?.cancel();
+    this.inFlight.delete(pageNumber);
+    this.pendingQueue.delete(pageNumber);
+    this.state.delete(pageNumber);
+    figure.querySelector('img.pdf-page-img')?.removeAttribute('src');
   }
 
   destroy(): void {
@@ -115,6 +168,7 @@ export class PdfPageLoader {
     for (const pending of this.inFlight.values()) pending.cancel();
     this.inFlight.clear();
     this.pendingQueue.clear();
+    this.figures.clear();
   }
 
   private handleRenderIntersect = (entries: IntersectionObserverEntry[]): void => {
@@ -154,6 +208,7 @@ export class PdfPageLoader {
   };
 
   private pump(): void {
+    if (this.paused || this.destroyed) return;
     while (this.inFlight.size < this.maxConcurrent && this.pendingQueue.size > 0) {
       const next = this.pickNearest();
       if (next === null) break;
@@ -183,7 +238,7 @@ export class PdfPageLoader {
   }
 
   private findFigure(pageNumber: number): HTMLElement | null {
-    return this.container.querySelector<HTMLElement>(`#pdf-page-${pageNumber}`);
+    return this.figures.get(pageNumber) ?? this.container?.querySelector<HTMLElement>(`#pdf-page-${pageNumber}`) ?? null;
   }
 
   private startRender(pageNumber: number): void {

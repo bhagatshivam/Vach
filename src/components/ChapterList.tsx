@@ -1,6 +1,7 @@
 import { memo, useContext, useEffect, useRef } from 'react';
 import { chapterRenderProbe } from '../lib/chapterRenderProbe';
 import { ImageContext } from './imageContext';
+import { PdfPageLoaderContext } from './pdfPageLoaderContext';
 import { TableAdaptContext } from './tableAdaptContext';
 
 interface ChapterSectionProps {
@@ -18,6 +19,7 @@ export const ChapterSection = memo(function ChapterSection({ index, html }: Chap
   chapterRenderProbe.onRender?.(index);
   const tables = useContext(TableAdaptContext);
   const images = useContext(ImageContext);
+  const pages = useContext(PdfPageLoaderContext);
   const sectionRef = useRef<HTMLElement>(null);
 
   // Once this chapter's HTML is in the DOM, hand it to the table adapter and
@@ -28,15 +30,17 @@ export const ChapterSection = memo(function ChapterSection({ index, html }: Chap
   // unmounted runs the cleanup below: the table adapter forgets its tables, the
   // image controller stops watching its pictures and lets go of them (the store
   // revokes the blob: URLs nobody else is showing). A chapter that comes back
-  // mounts as new and is registered afresh.
+  // mounts as new and is registered afresh. A PDF page's placeholder goes to the
+  // page loader the same way: it rasterizes the page while it is near the screen
+  // and lets go of it when the chapter unmounts.
   useEffect(() => {
     const section = sectionRef.current;
     if (!section) return;
-    const stops = [tables?.register(section), images?.register(section)];
+    const stops = [tables?.register(section), images?.register(section), pages?.register(section)];
     return () => {
       for (const stop of stops) stop?.();
     };
-  }, [tables, images]);
+  }, [tables, images, pages]);
 
   return <section ref={sectionRef} className="chapter" dangerouslySetInnerHTML={{ __html: html }} />;
 });

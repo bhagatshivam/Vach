@@ -17,7 +17,7 @@ const store = vi.hoisted(() => ({
   chapterCount: 6,
   toc: [] as unknown[],
   gate: null as null | { after: number; promise: Promise<void> },
-  pdf: null as null | { pages: number; gateAfter: number; gate: Promise<void>; outline: unknown[] },
+  pdf: null as null | { pages: number; gateAfter: number; gate: Promise<void>; outline: unknown[]; opened: number; loaded: number[] },
 }));
 
 vi.mock('@capacitor/core', () => ({ registerPlugin: () => ({ apply: async () => {} }) }));
@@ -72,17 +72,25 @@ vi.mock('../lib/fileBridge', () => ({
 vi.mock('../lib/pdf', () => ({
   openPdf: async () => {
     const pdf = store.pdf!;
+    pdf.opened++;
+    // A page's text is only extracted when it is asked for; pages after `gateAfter` are slow (they wait for the gate).
+    const loadPage = async (i: number) => {
+      pdf.loaded.push(i);
+      if (i > pdf.gateAfter) await pdf.gate;
+      return { html: `<p>page ${i + 1}</p>`, pageKind: 'text' as const };
+    };
     return {
+      title: 'A PDF',
+      numPages: pdf.pages,
       destroy() {},
       renderPageImage: () => ({ promise: new Promise(() => {}), cancel() {} }),
       getOutline: async () => pdf.outline,
-      streamChapters: async function* () {
+      loadPage,
+      cancelPending: () => 0,
+      streamChapters: async function* (startIndex = 0) {
         yield { type: 'title', title: 'A PDF' };
         yield { type: 'total', count: pdf.pages };
-        for (let i = 0; i < pdf.pages; i++) {
-          if (i > pdf.gateAfter) await pdf.gate;
-          yield { type: 'chapter', html: `<p>page ${i + 1}</p>`, pageKind: 'text' };
-        }
+        for (let i = startIndex; i < pdf.pages; i++) yield { type: 'chapter', ...(await loadPage(i)) };
       },
     };
   },
@@ -376,19 +384,19 @@ describe('ReaderScreen - hardware Back and tapping outside', () => {
 });
 
 describe('ReaderScreen - a PDF with an outline', () => {
-  // 8 pages. The reader shows the first four together and the rest as they arrive.
+  // 8 pages. The reader takes the first four together; a page is only extracted when the reader needs it.
   const OUTLINE = [item('p0', 'Cover', 0), item('p1', 'Part One', 1), item('p7', 'Part Two', 7)];
 
   async function openPdfReader(gateAfter: number) {
     let release!: () => void;
-    store.pdf = { pages: 8, gateAfter, gate: new Promise<void>((resolve) => (release = resolve)), outline: OUTLINE };
+    store.pdf = { pages: 8, gateAfter, gate: new Promise<void>((resolve) => (release = resolve)), outline: OUTLINE, opened: 0, loaded: [] };
     const { default: ReaderScreen } = await import('./ReaderScreen');
     const view = render(<ReaderScreen file={pdfFile} onBack={() => {}} />);
     await waitFor(() => expect(view.container.querySelector('.reader-content:not(.pre-reveal) .chapter')).not.toBeNull());
     return { view, release };
   }
 
-  it('shows the outline, and a page that has already been extracted is jumped to at once', async () => {
+  it('shows the outline, and a page that is already mounted is jumped to at once', async () => {
     await openPdfReader(99);
     fireEvent.click(await screen.findByRole('button', { name: 'Contents' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Part One' }));
@@ -396,43 +404,45 @@ describe('ReaderScreen - a PDF with an outline', () => {
     expect(screen.queryByText(/Getting to/)).toBeNull();
   });
 
-  it('the last page is jumped to when it has already been extracted (a PDF never reopens a window)', async () => {
+  it('the last page is extracted when it is asked for and the window moves there: no waiting for the pages in between, no bar, and the PDF is not reopened', async () => {
     await openPdfReader(99);
-    await waitFor(() => expect(document.querySelectorAll('.reader-content .chapter')).toHaveLength(8));
-    chapterHeight = 500_000; // even a very tall PDF page stack is only ever scrolled
+    chapterHeight = 500_000; // a tall page stack: only a window of it is ever mounted
+    await waitFor(() => expect(document.querySelectorAll('.reader-content .chapter').length).toBeLessThan(8));
     fireEvent.click(await screen.findByRole('button', { name: 'Contents' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Part Two' }));
-    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: 3_500_000 })));
+    await waitFor(() => expect(document.querySelector('.reader-content:not(.pre-reveal)')?.textContent).toContain('page 8'));
     expect(screen.queryByText(/Getting to/)).toBeNull();
+    expect(store.pdf!.opened).toBe(1);
+    expect(store.pdf!.loaded.filter((index) => index === 7)).toHaveLength(1);
+    // the pages between were never extracted for this
+    expect(store.pdf!.loaded.filter((index) => index > 3 && index < 6)).toEqual([]);
   });
 
-  it('a page the text pass has not reached yet: a visible, cancelable wait, then it lands there', async () => {
-    const { release } = await openPdfReader(5); // pages 1-6 are in; 7-8 are held back
-    await waitFor(() => expect(document.querySelectorAll('.reader-content .chapter')).toHaveLength(6));
+  it('a page that is slow to extract: a visible, cancelable wait after a moment, then it lands there', async () => {
+    const { release } = await openPdfReader(5); // pages 1-6 are quick; 7-8 are held back
     fireEvent.click(await screen.findByRole('button', { name: 'Contents' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Part Two' }));
 
-    const bar = await screen.findByRole('status');
+    expect(screen.queryByText(/Getting to/)).toBeNull(); // a quick page never flashes the bar
+    const bar = await screen.findByRole('status', {}, { timeout: 3000 });
     expect(bar.textContent).toContain('Part Two');
-    expect(bar.textContent).toMatch(/page 6 of 8/);
-    expect(scrollTo).not.toHaveBeenCalledWith(expect.objectContaining({ top: 700 }));
+    expect(bar.textContent).toMatch(/page 8/);
 
     release();
-    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: 700 })));
     await waitFor(() => expect(screen.queryByText(/Getting to/)).toBeNull());
+    await waitFor(() => expect(document.querySelector('.reader-content:not(.pre-reveal)')?.textContent).toContain('page 8'));
   });
 
   it('Cancel stops waiting: the bar goes and the reader does not jump when the page arrives', async () => {
     const { release } = await openPdfReader(5);
-    await waitFor(() => expect(document.querySelectorAll('.reader-content .chapter')).toHaveLength(6));
     fireEvent.click(await screen.findByRole('button', { name: 'Contents' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Part Two' }));
-    fireEvent.click(await within(await screen.findByRole('status')).findByRole('button', { name: 'Cancel' }));
+    fireEvent.click(await within(await screen.findByRole('status', {}, { timeout: 3000 })).findByRole('button', { name: 'Cancel' }));
     expect(screen.queryByText(/Getting to/)).toBeNull();
     scrollTo.mockClear();
     release();
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(scrollTo).not.toHaveBeenCalledWith(expect.objectContaining({ top: 700 }));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(scrollTo).not.toHaveBeenCalled(); // (the page itself may still be mounted as the reader's window reaches it - it is a 8-page book)
   });
 });
 

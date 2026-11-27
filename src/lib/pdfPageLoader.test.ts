@@ -338,3 +338,135 @@ describe('PdfPageLoader', () => {
     expect(renderObserverOf().observed.size).toBe(0);
   });
 });
+
+// A page is registered when its chapter mounts and let go of when the chapter unmounts: the window of mounted pages moves,
+// so pages come and go and the loader must keep no trace of one that left.
+describe('PdfPageLoader - pages registered one chapter at a time', () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    FakeIntersectionObserver.instances = [];
+    vi.stubGlobal('IntersectionObserver', FakeIntersectionObserver);
+    container = document.createElement('div');
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    container.remove();
+  });
+
+  function mount(pageNumber: number): { section: HTMLElement; figure: HTMLElement } {
+    const figure = makeFigure(pageNumber, 0);
+    appendAsChapter(container, figure);
+    return { section: figure.parentElement as HTMLElement, figure };
+  }
+  const neverEnding = () => ({ promise: deferred<PdfPageImageResult | null>().promise, cancel: vi.fn() });
+
+  it('register() watches a mounted chapter\'s page, with no container needed', () => {
+    const { section, figure } = mount(7);
+    const render = vi.fn(neverEnding);
+    const loader = new PdfPageLoader({ renderPageImage: render });
+    loader.register(section);
+    expect(renderObserverOf().observed.has(figure)).toBe(true);
+    expect(evictObserverOf().observed.has(figure)).toBe(true);
+    renderObserverOf().fire([{ target: figure, isIntersecting: true }]);
+    expect(render).toHaveBeenCalledWith(7, 375, expect.any(Number));
+  });
+
+  it('letting go of a chapter stops watching its page and cancels a render in flight', () => {
+    const { section, figure } = mount(7);
+    const cancel = vi.fn();
+    const loader = new PdfPageLoader({ renderPageImage: () => ({ promise: deferred<PdfPageImageResult | null>().promise, cancel }) });
+    const stop = loader.register(section);
+    renderObserverOf().fire([{ target: figure, isIntersecting: true }]);
+    stop();
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(renderObserverOf().observed.has(figure)).toBe(false);
+    expect(evictObserverOf().observed.has(figure)).toBe(false);
+  });
+
+  it('a page that was waiting for a render slot is dropped from the queue when its chapter unmounts', () => {
+    const pages = [1, 2, 3].map(mount);
+    const started: number[] = [];
+    const loader = new PdfPageLoader({
+      renderPageImage: (n) => {
+        started.push(n);
+        return neverEnding();
+      },
+    });
+    const stops = pages.map((p) => loader.register(p.section));
+    renderObserverOf().fire(pages.map((p) => ({ target: p.figure, isIntersecting: true })));
+    expect(started).toEqual([1, 2]); // the third waits: two at a time
+    stops[2](); // it unmounts while it waits
+    stops[0](); // a slot frees up...
+    expect(started).toEqual([1, 2]); // ...and nothing starts for the page that left
+  });
+
+  it('a render that finishes after its chapter unmounted is discarded, not written anywhere', async () => {
+    const { section, figure } = mount(4);
+    const pending = deferred<PdfPageImageResult | null>();
+    const loader = new PdfPageLoader({ renderPageImage: () => ({ promise: pending.promise, cancel: vi.fn() }) });
+    const stop = loader.register(section);
+    renderObserverOf().fire([{ target: figure, isIntersecting: true }]);
+    stop();
+    pending.resolve({ dataUrl: 'data:image/jpeg;base64,AAAA', byteLength: 3, width: 1, height: 1 });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(figure.querySelector('img')!.getAttribute('src')).toBeNull();
+  });
+
+  it('a page that comes back as a new element (the chapter mounted again) is rendered afresh', () => {
+    const first = mount(4);
+    const render = vi.fn(neverEnding);
+    const loader = new PdfPageLoader({ renderPageImage: render });
+    const stop = loader.register(first.section);
+    renderObserverOf().fire([{ target: first.figure, isIntersecting: true }]);
+    stop();
+    first.section.remove();
+    const again = mount(4);
+    loader.register(again.section);
+    renderObserverOf().fire([{ target: again.figure, isIntersecting: true }]);
+    expect(render).toHaveBeenCalledTimes(2);
+  });
+
+  it('registering the same chapter twice does not watch its page twice', () => {
+    const { section } = mount(9);
+    const loader = new PdfPageLoader({ renderPageImage: neverEnding });
+    loader.register(section);
+    loader.register(section);
+    expect(renderObserverOf().observed.size).toBe(1);
+  });
+
+  it('pause() holds renders back until resume(): pages near the top are not rendered while the reader is still being put at its place', () => {
+    const { section, figure } = mount(2);
+    const render = vi.fn(neverEnding);
+    const loader = new PdfPageLoader({ renderPageImage: render });
+    loader.pause();
+    loader.register(section);
+    renderObserverOf().fire([{ target: figure, isIntersecting: true }]);
+    expect(render).not.toHaveBeenCalled();
+    loader.resume();
+    expect(render).toHaveBeenCalledWith(2, 375, expect.any(Number));
+  });
+
+  it('a page rendered while paused-then-left (evicted) before resume() is never rendered', () => {
+    const { section, figure } = mount(2);
+    const render = vi.fn(neverEnding);
+    const loader = new PdfPageLoader({ renderPageImage: render });
+    loader.pause();
+    loader.register(section);
+    renderObserverOf().fire([{ target: figure, isIntersecting: true }]);
+    evictObserverOf().fire([{ target: figure, isIntersecting: false }]);
+    loader.resume();
+    expect(render).not.toHaveBeenCalled();
+  });
+
+  it('register() after destroy() is a no-op', () => {
+    const { section } = mount(1);
+    const loader = new PdfPageLoader({ renderPageImage: neverEnding });
+    loader.destroy();
+    expect(() => loader.register(section)()).not.toThrow();
+    expect(renderObserverOf().observed.size).toBe(0);
+  });
+});
