@@ -64,7 +64,7 @@ function source(size: number, read?: FileSource['read']): FileSource & { reads: 
 
 function emptyDoc() {
   return {
-    numPages: 0,
+    numPages: 1,
     getMetadata: async () => ({ info: {} }),
     getPage: async () => {
       throw new Error('unused');

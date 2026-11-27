@@ -21,6 +21,7 @@ import { detectPdfCompatGaps, installPdfCompatPolyfills } from './pdfCompatPolyf
 import type { FileSource } from './fileBridge';
 import type { TocItem } from './toc';
 import { BridgeRangeTransport, PDF_INITIAL_BYTES, PDF_RANGE_CHUNK_BYTES } from './pdfRangeTransport';
+import { PdfPageExtractor } from './pdfPages';
 
 // Logged once, main thread only - the worker's own copy of this check logs
 // from pdfWorkerEntry.ts, since it's a separate realm with its own
@@ -355,49 +356,42 @@ export async function classifyAndRenderPage(page: PDFPageProxy, pageNumber: numb
   return { html, pageKind: html ? 'text' : 'blank' };
 }
 
-async function* streamChaptersImpl(doc: PDFDocumentProxy, fallbackTitle: string): AsyncGenerator<ParseEvent> {
-  let title = fallbackTitle;
+/** The placeholder shown for a page whose text could not be extracted. */
+export const PAGE_ERROR_HTML = '<p class="chapter-error">[This page could not be loaded]</p>';
+
+export interface PdfPage {
+  html: string;
+  pageKind: PageKind;
+}
+
+/**
+ * Extracts one page (0-based index) into reader HTML. Never throws for a bad page: it becomes a placeholder, as it always
+ * has. pdf.js's per-page caches are released as soon as the page has been read - independent of, and ahead of, any later
+ * on-demand rasterization of a raster page, which re-fetches the page proxy itself.
+ */
+async function extractPage(doc: PDFDocumentProxy, pageIndex: number): Promise<PdfPage> {
+  let page: PDFPageProxy | null = null;
+  try {
+    page = await doc.getPage(pageIndex + 1);
+    return await classifyAndRenderPage(page, pageIndex + 1);
+  } catch (err) {
+    console.error('[pdf] failed to parse page', pageIndex + 1, err);
+    return { html: PAGE_ERROR_HTML, pageKind: 'text' };
+  } finally {
+    page?.cleanup();
+  }
+}
+
+/** The document's own title (its metadata), or `fallbackTitle`. */
+async function documentTitle(doc: PDFDocumentProxy, fallbackTitle: string): Promise<string> {
   try {
     const metadata = await doc.getMetadata();
     const infoTitle = (metadata.info as { Title?: string } | undefined)?.Title;
-    if (infoTitle && infoTitle.trim()) {
-      title = infoTitle.trim();
-    }
+    if (infoTitle && infoTitle.trim()) return infoTitle.trim();
   } catch {
     // Metadata is optional - fall back to the file name silently.
   }
-  yield { type: 'title', title };
-
-  if (doc.numPages === 0) {
-    throw new Error('This PDF has no pages');
-  }
-  // doc.numPages is known the moment the document loads, before any page is
-  // actually extracted - same reasoning as streamEpub's 'total' event.
-  yield { type: 'total', count: doc.numPages };
-
-  for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber++) {
-    let html: string;
-    let pageKind: PageKind = 'text';
-    let page: PDFPageProxy | null = null;
-    try {
-      page = await doc.getPage(pageNumber);
-      const result = await classifyAndRenderPage(page, pageNumber);
-      html = result.html;
-      pageKind = result.pageKind;
-    } catch (err) {
-      console.error('[pdf] failed to parse page', pageNumber, err);
-      html = '<p class="chapter-error">[This page could not be loaded]</p>';
-      pageKind = 'text';
-    } finally {
-      // Releases pdf.js's own per-page caches (operator list, parsed fonts
-      // for this page, etc.) now that this page's text/classification pass
-      // is done with them - independent of, and ahead of, any later
-      // on-demand rasterization of a raster-classified page, which re-fetches
-      // the page proxy itself and calls cleanup() again after rendering.
-      page?.cleanup();
-    }
-    yield { type: 'chapter', html, pageKind };
-  }
+  return fallbackTitle;
 }
 
 // ---------------------------------------------------------------------------
@@ -531,7 +525,20 @@ function renderPageImageImpl(
 }
 
 export interface PdfHandle {
-  streamChapters(): AsyncGenerator<ParseEvent>;
+  /** The document's title (metadata), or the file name. */
+  title: string;
+  /** Number of pages. Known as soon as the document is open, before any page is read. */
+  numPages: number;
+  /**
+   * Extracts one page (0-based) into reader HTML, only when asked: nothing is read ahead. Pages are extracted one at a
+   * time, most urgent first (`priority`), and shared if asked for twice. Rejects with PageCancelledError when the page was
+   * dropped by cancelPending() before it started.
+   */
+  loadPage(pageIndex: number, priority?: number): Promise<PdfPage>;
+  /** Drops the pages that were asked for but have not started: the reader moved on and does not need them. */
+  cancelPending(): number;
+  /** Title, total, then the pages from `startIndex` (0-based) on, one at a time, as they are extracted. */
+  streamChapters(startIndex?: number): AsyncGenerator<ParseEvent>;
   /**
    * The document's outline (bookmarks) as a table of contents whose
    * `chapterIndex` is the page index (0-based; the reader's chapter k is page
@@ -548,26 +555,6 @@ export interface PdfHandle {
   renderPageImage(pageNumber: number, viewportWidthPx: number, devicePixelRatio: number): PendingPdfRender;
   /** Releases the underlying PDFDocumentProxy. Call once, on unmount. */
   destroy(): void;
-}
-
-/**
- * Re-yields the page stream, but turns a failed bridge read into a thrown
- * error. pdf.js has no error channel for range requests: when a read fails
- * the document is torn down (see openPdf) and each pending page just
- * rejects with an unhelpful "destroyed" message, which the per-page handler
- * above would swallow into "[This page could not be loaded]" placeholders.
- * Checking the transport's own recorded error first surfaces the real cause
- * once, instead.
- */
-async function* surfaceBridgeErrors(
-  events: AsyncGenerator<ParseEvent>,
-  transport: BridgeRangeTransport,
-): AsyncGenerator<ParseEvent> {
-  for await (const event of events) {
-    if (transport.fatalError) throw transport.fatalError;
-    yield event;
-  }
-  if (transport.fatalError) throw transport.fatalError;
 }
 
 // ---------------------------------------------------------------------------
@@ -642,9 +629,10 @@ export async function resolvePdfOutline(nodes: readonly PdfOutlineNode[] | null 
  * Bytes come from `source` through a PDFDataRangeTransport: pdf.js requests
  * only the ranges it needs and the whole file is never held as a Base64
  * string or a second full-size copy on the main thread. (pdf.js itself
- * still keeps a full-length buffer in its worker, and the text pass below
- * still visits every page, so memory is about 1x the file size - flat
- * memory needs lazy per-page extraction, a later phase.)
+ * still allocates a full-length buffer in its worker; only the ranges that
+ * were asked for are ever filled in, and a page's text is only extracted
+ * when the reader asks for that page - loadPage - so what is touched follows
+ * the reader, not the file.)
  */
 export async function openPdf(source: FileSource, fallbackTitle: string): Promise<PdfHandle> {
   const initialLength = Math.min(source.size, PDF_INITIAL_BYTES);
@@ -682,11 +670,41 @@ export async function openPdf(source: FileSource, fallbackTitle: string): Promis
     throw err;
   }
 
+  if (doc.numPages === 0) {
+    loadingTask.destroy().catch((err) => console.error('[pdf] destroy after an empty document failed', err));
+    throw new Error('This PDF has no pages');
+  }
+  const title = await documentTitle(doc, fallbackTitle);
+
   let destroyed = false;
+  // One page at a time, the most urgent first (see PdfPageExtractor): pdf.js extracts in a single worker anyway.
+  const extractor = new PdfPageExtractor<PdfPage>(async (pageIndex) => {
+    const result = await extractPage(doc, pageIndex);
+    // A failed read of the file is not "this page is bad": say what really went wrong, once.
+    if (transport.fatalError) throw transport.fatalError;
+    return result;
+  });
 
   return {
-    streamChapters() {
-      return surfaceBridgeErrors(streamChaptersImpl(doc, fallbackTitle), transport);
+    title,
+    numPages: doc.numPages,
+    loadPage(pageIndex, priority = 0) {
+      if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= doc.numPages) {
+        return Promise.reject(new RangeError(`No page ${pageIndex + 1} (this PDF has ${doc.numPages})`));
+      }
+      return extractor.load(pageIndex, priority);
+    },
+    cancelPending() {
+      return extractor.cancelPending();
+    },
+    async *streamChapters(startIndex = 0) {
+      yield { type: 'title', title } as ParseEvent;
+      // doc.numPages is known the moment the document loads, before any page is actually extracted.
+      yield { type: 'total', count: doc.numPages } as ParseEvent;
+      for (let pageIndex = Math.max(0, startIndex); pageIndex < doc.numPages; pageIndex++) {
+        const { html, pageKind } = await extractor.load(pageIndex);
+        yield { type: 'chapter', html, pageKind } as ParseEvent;
+      }
     },
     async getOutline() {
       try {
@@ -711,6 +729,7 @@ export async function openPdf(source: FileSource, fallbackTitle: string): Promis
     destroy() {
       if (destroyed) return;
       destroyed = true;
+      extractor.destroy();
       transport.abort();
       // PDFDocumentProxy itself has no destroy() - releasing the document
       // (worker thread, transport, cached pages) goes through its

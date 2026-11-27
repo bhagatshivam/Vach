@@ -2,6 +2,8 @@
 // harness (window.frame) plus what the mounting measurements need - timed opening, a DOM/page-height snapshot, and scripted
 // flings and drags whose frame gaps are recorded. Test tooling only; nothing here ships in the app.
 import './frame-entry';
+import { openEpubFile } from '../../src/lib/epubFile';
+import { createFileSource } from '../../src/lib/fileBridge';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 type Frame = {
@@ -246,6 +248,73 @@ const api = {
     });
     const sorted = [...gaps].sort((a, b) => a - b);
     return { frames, shifts, mountChanges, from, to: Number(api.visibleBlock()?.id.split(':')[0] ?? -1), maxGapMs: Math.round(Math.max(...gaps)), p95GapMs: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), over50: gaps.filter((g) => g > 50).length };
+  },
+
+  /**
+   * Taps the Contents entry titled `title` (the drawer must already be open) and times how long it takes until chapter
+   * (page) `target` is on screen with the reader revealed; also reports whether the "Getting to ..." wait bar was ever up.
+   * A page counts as on screen when its text carries MARK_<target>, or, for a scanned page, when #pdf-page-<target + 1> is in view.
+   */
+  async timedJump(title: string, target: number, timeoutMs = 120000) {
+    const entry = Array.from(document.querySelectorAll<HTMLButtonElement>('.toc-item')).find((b) => b.textContent === title);
+    if (!entry) return { error: `no Contents entry "${title}"` };
+    entry.scrollIntoView({ block: 'center' });
+    const t0 = performance.now();
+    entry.click();
+    let waitBar = false;
+    let barSince = -1;
+    let barMs = 0;
+    let overlaySeen = false;
+    while (performance.now() - t0 < timeoutMs) {
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+      const bar = Boolean(document.querySelector('.toc-wait'));
+      if (bar && barSince < 0) barSince = performance.now();
+      if (!bar && barSince >= 0) {
+        barMs += performance.now() - barSince;
+        barSince = -1;
+      }
+      waitBar ||= bar;
+      overlaySeen ||= Boolean(document.querySelector('.restore-overlay'));
+      const revealed = !document.querySelector('.restore-overlay') && Boolean(document.querySelector('.reader-content:not(.pre-reveal)')) && !document.querySelector('.toc-panel');
+      if (!revealed) continue;
+      const onScreen = frame().screen().visible.some((v) => v.marker === String(target));
+      const figure = document.getElementById(`pdf-page-${target + 1}`);
+      const figureRect = figure?.getBoundingClientRect();
+      const figureOnScreen = Boolean(figureRect && figureRect.bottom > 0 && figureRect.top < window.innerHeight);
+      if (onScreen || figureOnScreen) return { ms: Math.round(performance.now() - t0), waitBar, waitBarMs: Math.round(barMs), overlaySeen };
+    }
+    return { error: 'timed out', ms: Math.round(performance.now() - t0), waitBar };
+  },
+
+  /** How long the part of opening an EPUB that a metadata cache could skip takes: reading and parsing its index, then its table of contents. */
+  async timeEpubIndex(name: string) {
+    const bridge = (window as unknown as { __bridge: { calls: number; bytes: number } }).__bridge;
+    const calls0 = bridge.calls;
+    const bytes0 = bridge.bytes;
+    const t0 = performance.now();
+    const book = await openEpubFile(`content://x/${name}`, name);
+    const t1 = performance.now();
+    const toc = await book.toc();
+    const t2 = performance.now();
+    book.close();
+    return { openMs: Math.round(t1 - t0), tocMs: Math.round(t2 - t1), chapters: book.chapterCount, tocItems: toc.length, calls: bridge.calls - calls0, bytes: bridge.bytes - bytes0 };
+  },
+
+  /** The same for a PDF: opening the document (pdf.js reads the cross-reference table and the page tree), then resolving its outline. */
+  async timeOpenPdf(name: string) {
+    const bridge = (window as unknown as { __bridge: { calls: number; bytes: number } }).__bridge;
+    const calls0 = bridge.calls;
+    const bytes0 = bridge.bytes;
+    const { openPdf } = await import('../../src/lib/pdf');
+    const t0 = performance.now();
+    const source = await createFileSource(`content://x/${name}`);
+    const handle = await openPdf(source, name);
+    const t1 = performance.now();
+    const outline = await handle.getOutline();
+    const t2 = performance.now();
+    const pages = handle.numPages;
+    handle.destroy();
+    return { openMs: Math.round(t1 - t0), outlineMs: Math.round(t2 - t1), pages, outlineItems: outline.length, calls: bridge.calls - calls0, bytes: bridge.bytes - bytes0 };
   },
 
   /** Opens the Contents drawer, expands every group, and returns the entries' titles (the drawer is left open for frame.jumpTo). Null if the book has no Contents. */
