@@ -125,7 +125,7 @@ near and the whole book read through with **0 of 23 screens blank**, at most 18 
 
 ### What pdf.js's whole-file buffer costs (not changed here)
 
-pdf.js allocates a full-length buffer for the file in its worker, and reads only the ranges that were asked for into it. Measured above: a modern 98 MB PDF costs **+46 MB over the idle
+pdf.js allocates a full-length buffer for the file in its worker, and reads only the ranges that were asked for into it. Measured above: a modern 98 MB PDF costs **+62 MB over the idle
 browser at open** (2 reads, 1.7 MB) and, once every page has been looked at, the renderer holds about 0.75 GB more, in the old reader and the new one alike (1,180 MB before, 1,201 MB after): lazy
 extraction saves the memory of everything the reader never goes near, not the memory of what it reads. An experiment that cleared every page picture and called `PDFDocumentProxy.cleanup()` after
 such a read-through freed only 35 MB, so it is not the mounted pages or bitmaps (those are bounded: at most 18 rendered pages) but pdf.js's own buffer and caches plus, in this harness, the
