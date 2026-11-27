@@ -82,7 +82,7 @@ const SE_BACK = [
 ];
 const named = (n) => Array.from({ length: n }, (_, i) => ({ title: `Chapter ${i + 1}`, paragraphs: 8 + (i % 7) }));
 
-const TALL_NAME = 'very tall book: 150 chapters, last ones past 8.4M px of scroll';
+const TALL_NAME = 'very tall book: 150 chapters, 10.7M px as a whole';
 const BOOKS = {
   [TALL_NAME]: await tallEpub(),
   'reopened mid-book at a saved position (Standard Ebooks-like, 365 chapters)': await epub([...named(362), ...SE_BACK]),
@@ -173,9 +173,11 @@ for (const [name, base64] of Object.entries(BOOKS)) {
       continue;
     }
     if (titles.tall) {
-      await page.waitForFunction((last) => window.frame.screen().mounted[1] >= last, titles.streamedMarker, { timeout: 240000 });
+      // Only a window of the book is mounted (mountWindow.ts), so the page is short however long the book is, and no chapter
+      // sits past 2^23 px: a jump to a far chapter reopens the window at it.
+      await page.waitForTimeout(1500);
       const h = await page.evaluate(() => document.documentElement.scrollHeight);
-      record(`${label}: the whole book is mounted and the page is taller than 2^23 px (${(h / 1e6).toFixed(1)}M px)`, h > 2 ** 23);
+      record(`${label}: only a window of the book is mounted: the page is under 1.5M px, not 10.7M (${(h / 1e6).toFixed(2)}M px)`, h < 1_500_000);
     }
     // Opening on the book itself (chapter 1) must be fine too.
     const start = await page.evaluate(() => window.frame.screen());

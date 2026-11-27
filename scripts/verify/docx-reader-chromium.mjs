@@ -7,7 +7,7 @@
 //
 // The Word converter runs on the main thread here (the page bundle has no Worker); docx-chromium.mjs covers the Worker.
 
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -171,8 +171,25 @@ for (const viewport of VIEWPORTS) {
   await page.evaluate(() => window.frame.show('reader', { theme: 'sepia' }, null, 4, 'sample.docx'));
   const state = await page.evaluate(() => window.frame.screen());
   record('saved position: reopening at section 4 shows "Part Two", not the start of the document', state.visible.some((v) => /^Part Two/.test(v.text)) && !state.overlay, JSON.stringify(state.visible));
-  record('saved position: the earlier sections were not mounted just to get there (the first one is not on the page)', !(await page.evaluate(() => Array.from(document.querySelectorAll('.reader-content .chapter')).some((c) => /^Vach|A sample document for Vach/.test(c.textContent ?? '')))));
+  // The sample is shorter than a few screens, so the sections above the reader are within the mounted window (the window
+  // keeps about five screens of text above and below the reader): they are mounted because they are that close. What matters
+  // is that a LONG document is not mounted from its start to get to a saved position: checked below on the 100,000-word one.
+  record('saved position: the sections above the reader are mounted only because they are within a few screens of it', await page.evaluate(() => document.documentElement.scrollHeight < 6 * window.innerHeight * 2));
   record('saved position: no uncaught page errors', errors.length === 0, errors.join('; '));
+  await page.close();
+}
+
+// ---- a saved position deep in a long document -----------------------------------------------------------------------------------
+const BIG_DOCX = join(repo, 'node_modules/.cache/vach-bench/docx/words-100k.docx');
+if (existsSync(BIG_DOCX)) {
+  const { page, errors } = await open({ width: 360, height: 800 }, readFileSync(BIG_DOCX).toString('base64'));
+  await page.evaluate(() => window.frame.show('reader', { theme: 'sepia' }, null, undefined, 'big.docx'));
+  const firstText = await page.evaluate(() => (document.querySelector('.reader-content .chapter')?.textContent ?? '').slice(0, 60));
+  await page.evaluate(() => window.frame.show('reader', { theme: 'sepia' }, null, 20, 'big.docx'));
+  await page.waitForTimeout(1500);
+  const deep = await page.evaluate((first) => ({ sections: document.querySelectorAll('.reader-content .chapter').length, hasFirst: Array.from(document.querySelectorAll('.reader-content .chapter')).some((c) => (c.textContent ?? '').startsWith(first)), height: document.documentElement.scrollHeight, overlay: Boolean(document.querySelector('.restore-overlay')) }), firstText);
+  record(`saved position deep in a 100,000-word document: opens at section 20 with only a window of the document mounted (${deep.sections} sections, ${(deep.height / 1e3).toFixed(0)}k px), not the sections before it`, !deep.overlay && !deep.hasFirst && deep.sections <= 10, JSON.stringify(deep));
+  record('saved position deep in a long document: no uncaught page errors', errors.length === 0, errors.join('; '));
   await page.close();
 }
 

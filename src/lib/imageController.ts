@@ -33,11 +33,17 @@ export class ImageController {
           );
   }
 
-  /** Starts watching the pending images of a mounted chapter. Returns the function that stops. */
+  /**
+   * Starts watching the pending images of a mounted chapter, and holds its pictures in the store for as long as it is
+   * mounted. Returns the function that stops: it stops watching and lets go, and a picture no other chapter (or the
+   * lightbox) holds is released - its blob: URL revoked.
+   */
   register(section: HTMLElement): () => void {
     if (this.destroyed) return () => {};
     const mine: HTMLImageElement[] = [];
-    for (const img of Array.from(section.querySelectorAll('img'))) {
+    const images = Array.from(section.querySelectorAll('img'));
+    const letGo = this.store.hold(images.map((img) => img.getAttribute('src') ?? ''));
+    for (const img of images) {
       const src = img.getAttribute('src');
       if (!src) continue;
       const current = this.store.currentUrl(src);
@@ -56,6 +62,7 @@ export class ImageController {
     }
     return () => {
       for (const img of mine) this.forget(img);
+      letGo();
     };
   }
 

@@ -19,5 +19,7 @@ export async function openEpubFile(): Promise<EpubBook> {
       }
     };
   }
+  // Handed to the checks, which read how many blob: URLs the book has made (ImageStore.liveUrlCount).
+  (window as unknown as { __book?: EpubBook }).__book = book;
   return book;
 }

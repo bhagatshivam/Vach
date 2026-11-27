@@ -169,3 +169,85 @@ describe('ImageController with IntersectionObserver (only images near the viewpo
     controller.destroy();
   });
 });
+
+describe('ImageController: a chapter holds its pictures while it is mounted', () => {
+  function storeThatCounts() {
+    let counter = 0;
+    const revoked: string[] = [];
+    const deps: ImageDeps = {
+      createObjectURL: () => `blob:http://localhost/${++counter}`,
+      revokeObjectURL: (url) => void revoked.push(url),
+      resample: async () => new Blob(['small'], { type: 'image/webp' }),
+      viewport: () => ({ width: 400, height: 800, devicePixelRatio: 2 }),
+    };
+    return { store: new ImageStore(deps, { dropGraceMs: 0 }), revoked };
+  }
+
+  it('stopping (the chapter unmounts) releases its pictures: the downscaled blob: URL is revoked', async () => {
+    const { store, revoked } = storeThatCounts();
+    const controller = new ImageController(store);
+    const { section, srcs } = chapterWith(store, ['a.png', 'b.png']);
+    const stop = controller.register(section);
+    await settle();
+    const shown = Array.from(section.querySelectorAll('img')).map((img) => img.getAttribute('src')!);
+    expect(shown.every((src) => !src.includes('#vach-'))).toBe(true);
+    expect(revoked).toEqual([]);
+
+    stop();
+    expect(new Set(revoked)).toEqual(new Set(shown));
+    expect(srcs.every((src) => store.describe(src) === null)).toBe(true);
+    controller.destroy();
+  });
+
+  it('a picture two mounted chapters share survives the first of them unmounting', async () => {
+    const { store, revoked } = storeThatCounts();
+    const controller = new ImageController(store);
+    const bytes = pngBytes(3000, 2000);
+    const src = store.register('ornament.png', bytes, 'image/png', { read: async () => bytes }).url;
+    const make = () => {
+      const section = document.createElement('section');
+      const img = document.createElement('img');
+      img.setAttribute('src', src);
+      section.append(img);
+      document.body.append(section);
+      return section;
+    };
+    const first = make();
+    const second = make();
+    const stopFirst = controller.register(first);
+    const stopSecond = controller.register(second);
+    await settle();
+    stopFirst();
+    expect(revoked).toEqual([]);
+    expect(second.querySelector('img')!.getAttribute('src')).not.toContain('#vach-');
+    stopSecond();
+    expect(revoked).toHaveLength(1);
+    controller.destroy();
+  });
+
+  it('a chapter mounted again (the same markup, registered afresh) is processed again from scratch', async () => {
+    const { store } = storeThatCounts();
+    const controller = new ImageController(store);
+    const bytes = pngBytes(3000, 2000);
+    const first = document.createElement('section');
+    const firstImg = document.createElement('img');
+    firstImg.setAttribute('src', store.register('a.png', bytes, 'image/png', { read: async () => bytes }).url);
+    first.append(firstImg);
+    document.body.append(first);
+    controller.register(first)();
+    first.remove();
+
+    // The chapter comes back: its HTML is made again, so register() answers with a new src.
+    const again = document.createElement('section');
+    const againImg = document.createElement('img');
+    againImg.setAttribute('src', store.register('a.png', bytes, 'image/png', { read: async () => bytes }).url);
+    again.append(againImg);
+    document.body.append(again);
+    const stop = controller.register(again);
+    await settle();
+    expect(againImg.getAttribute('src')).not.toContain('#vach-');
+    expect(againImg.getAttribute('src')).not.toBe(firstImg.getAttribute('src'));
+    stop();
+    controller.destroy();
+  });
+});

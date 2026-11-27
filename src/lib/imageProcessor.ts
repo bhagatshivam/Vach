@@ -212,6 +212,8 @@ export interface FullImage {
 
 interface Entry {
   id: number;
+  /** The key it was registered under (a book path), to forget it again. */
+  path: string;
   source: ImageSource;
   header: ImageHeader | null;
   mime: string;
@@ -221,7 +223,26 @@ interface Entry {
   finalUrl?: string;
   plan: ResizePlan | null;
   job?: Promise<string | null>;
+  /** Mounted chapters (and the lightbox) currently using this image; see ImageStore.hold(). */
+  holds: number;
+  /** Has anyone ever held it? Only an image that was held and then let go of is released; one nobody mounted yet is left alone. */
+  everHeld: boolean;
+  dropTimer?: ReturnType<typeof setTimeout>;
+  /** Released: its blob: URLs are revoked and a downscale still in flight must not make a new one. */
+  dropped: boolean;
 }
+
+export interface ImageStoreOptions {
+  /**
+   * How long an image nobody holds any more is kept before it is released. A chapter that unmounts in the same
+   * commit that another mounts (both showing a shared picture) must not pull it out from under the newcomer, whose
+   * HTML already names it. Tests pass 0.
+   */
+  dropGraceMs?: number;
+}
+
+/** Long enough for any chapter that was loaded alongside the one that let go to have mounted and taken its hold. */
+export const DEFAULT_DROP_GRACE_MS = 1500;
 
 export class ImageStore {
   private readonly deps: ImageDeps;
@@ -232,9 +253,11 @@ export class ImageStore {
   private placeholderBase: string | null = null;
   private nextId = 1;
   private closed = false;
+  private readonly dropGraceMs: number;
 
-  constructor(deps: ImageDeps = browserDeps) {
+  constructor(deps: ImageDeps = browserDeps, options: ImageStoreOptions = {}) {
     this.deps = deps;
+    this.dropGraceMs = options.dropGraceMs ?? DEFAULT_DROP_GRACE_MS;
   }
 
   /**
@@ -253,7 +276,7 @@ export class ImageStore {
     // turned; tapping it opens the full-detail copy.)
     const plan = header ? planDownscale(header, displayWidthCap(width, devicePixelRatio)) : null;
 
-    const entry: Entry = { id: this.nextId++, source, header, mime, src: '', plan };
+    const entry: Entry = { id: this.nextId++, path, source, header, mime, src: '', plan, holds: 0, everHeld: false, dropped: false };
     if (plan) {
       entry.src = `${this.placeholder()}#vach-${entry.id}`;
     } else {
@@ -267,6 +290,60 @@ export class ImageStore {
 
   private describeEntry(entry: Entry): RegisteredImage {
     return { url: entry.src, width: entry.header?.width, height: entry.header?.height };
+  }
+
+  /** What register() answered for `path`, if the image is still registered (not yet released); null otherwise. */
+  known(path: string): RegisteredImage | null {
+    const entry = this.byPath.get(path);
+    return entry ? this.describeEntry(entry) : null;
+  }
+
+  /**
+   * Marks the images behind these srcs (as put in HTML, or already downscaled) as in use by one more holder: a chapter
+   * that is mounted, the lightbox that is showing one. An image is released - its blob: URLs revoked, its entry
+   * forgotten, so a later register() of the same path starts afresh - once every holder has let go. Returns the function
+   * that lets go (safe to call twice). Srcs that are not ours are ignored.
+   */
+  hold(srcs: Iterable<string>): () => void {
+    const held: Entry[] = [];
+    for (const src of srcs) {
+      const entry = this.bySrc.get(src);
+      if (!entry || entry.dropped || held.includes(entry)) continue;
+      entry.holds++;
+      entry.everHeld = true;
+      if (entry.dropTimer !== undefined) {
+        clearTimeout(entry.dropTimer);
+        entry.dropTimer = undefined;
+      }
+      held.push(entry);
+    }
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      for (const entry of held) {
+        entry.holds--;
+        if (entry.holds > 0 || entry.dropped) continue;
+        if (this.dropGraceMs <= 0) this.drop(entry);
+        else entry.dropTimer = setTimeout(() => this.drop(entry), this.dropGraceMs);
+      }
+    };
+  }
+
+  private drop(entry: Entry): void {
+    entry.dropTimer = undefined;
+    if (entry.dropped || entry.holds > 0 || this.closed) return;
+    entry.dropped = true;
+    if (this.byPath.get(entry.path) === entry) this.byPath.delete(entry.path);
+    this.bySrc.delete(entry.src);
+    if (entry.finalUrl) this.bySrc.delete(entry.finalUrl);
+    // Its own blob: URLs only: the shared placeholder (a #fragment of one base URL) stays.
+    for (const url of new Set([entry.src.split('#')[0] === this.placeholderBase ? '' : entry.src, entry.finalUrl ?? ''])) {
+      if (url && this.created.delete(url)) {
+        ownBlobUrls.delete(url);
+        this.deps.revokeObjectURL(url);
+      }
+    }
   }
 
   /** What the reader knows about an image it is showing, by its current src; null if it is not one of ours. */
@@ -308,7 +385,7 @@ export class ImageStore {
       console.error('[images] could not re-read an image from the archive', error);
       return null;
     }
-    if (this.closed) return null;
+    if (this.closed || entry.dropped) return null;
 
     let blob: Blob;
     try {
@@ -319,7 +396,8 @@ export class ImageStore {
       console.error('[images] downscale failed, using the original', error);
       blob = new Blob([bytes as BlobPart], { type: entry.mime });
     }
-    if (this.closed) return null;
+    // The chapter was unmounted (and the picture released) while it was being resampled: no URL for nobody.
+    if (this.closed || entry.dropped) return null;
     entry.finalUrl = this.makeUrl(blob);
     this.bySrc.set(entry.finalUrl, entry);
     return entry.finalUrl;
@@ -388,6 +466,9 @@ export class ImageStore {
   /** Revokes every blob: URL this store made. After this the store gives out nothing more. */
   revokeAll(): void {
     this.closed = true;
+    for (const entry of this.bySrc.values()) {
+      if (entry.dropTimer !== undefined) clearTimeout(entry.dropTimer);
+    }
     for (const url of this.created) {
       ownBlobUrls.delete(url);
       this.deps.revokeObjectURL(url);

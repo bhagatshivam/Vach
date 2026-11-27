@@ -235,41 +235,43 @@ describe('ReaderScreen - internal links in a .docx', () => {
 
 describe('ReaderScreen - jumping to the last section of a 100,000-word .docx (the PR #12 rule)', () => {
   const sectionCount = () => document.querySelectorAll('.reader-content .chapter').length;
-
-  it('the document is about 36 sections and the Contents lists them all', async () => {
-    state.html = longDocument(100_000);
-    await openReader();
-    await waitFor(() => expect(sectionCount()).toBeGreaterThanOrEqual(35));
+  // The document's sections, as the Contents lists them: only a window of them is mounted at any time.
+  const contentsEntries = async () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Contents' }));
-    const entries = Array.from(document.querySelectorAll('.toc-item')).map((b) => b.textContent);
+    return Array.from(document.querySelectorAll('.toc-item')).map((b) => b.textContent ?? '');
+  };
+
+  it('the document is about 36 sections and the Contents lists them all, though only a window of them is mounted', async () => {
+    state.html = longDocument(100_000);
+    chapterHeight = 10_000; // each section is far taller than the screen: the window is a few of them
+    await openReader();
+    const entries = await contentsEntries();
     expect(entries.length).toBeGreaterThanOrEqual(35);
     expect(entries.length).toBeLessThanOrEqual(37);
     expect(entries.at(-1)).toBe(`Section ${entries.length}`);
+    await waitFor(() => expect(sectionCount()).toBeLessThan(8));
   });
 
-  it('near the top of the page it just scrolls', async () => {
+  it('a section in the window is just scrolled to', async () => {
     state.html = longDocument(100_000);
-    chapterHeight = 10_000; // 36 sections: the last is ~350,000 px down - under the limit
+    chapterHeight = 3_000; // the first four sections (12,000px) are all within the window of a 768px screen
     await openReader();
-    await waitFor(() => expect(sectionCount()).toBeGreaterThanOrEqual(35));
-    const last = sectionCount();
+    await waitFor(() => expect(sectionCount()).toBeGreaterThanOrEqual(4), { timeout: 5000 });
     scrollTo.mockClear();
     fireEvent.click(await screen.findByRole('button', { name: 'Contents' }));
-    fireEvent.click(await screen.findByRole('button', { name: `Section ${last}` }));
-    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: (last - 1) * 10_000 })));
+    fireEvent.click(await screen.findByRole('button', { name: 'Section 3' }));
+    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: 2 * 3_000 })));
     expect(state.openDocxCalls).toHaveLength(1);
   });
 
-  it('lower than the paintable limit it reopens the window at the last section instead of scrolling there', async () => {
+  it('a section outside the window reopens the window at it instead of scrolling there', async () => {
     state.html = longDocument(100_000);
-    chapterHeight = 100_000; // the last section is ~3.5M px down
+    chapterHeight = 100_000; // the last section would be ~3.5M px down
     await openReader();
-    await waitFor(() => expect(sectionCount()).toBeGreaterThanOrEqual(35));
-    const last = sectionCount();
+    const last = (await contentsEntries()).length;
     expect((last - 1) * chapterHeight).toBeGreaterThan(MAX_DIRECT_JUMP_OFFSET_PX);
     scrollTo.mockClear();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Contents' }));
     fireEvent.click(await screen.findByRole('button', { name: `Section ${last}` }));
 
     // The window is reopened at the last section (and the one before it), through the same opener.
@@ -290,7 +292,7 @@ describe('ReaderScreen - jumping to the last section of a 100,000-word .docx (th
     state.html = Array.from({ length: 40 }, (_, i) => `<h1>Chapter ${i + 1}</h1><p>${words(60, `c${i}_`)}</p>`).join('');
     chapterHeight = 100_000;
     await openReader();
-    await waitFor(() => expect(sectionCount()).toBe(40));
+    await waitFor(() => expect(sectionCount()).toBeLessThan(10));
     fireEvent.click(await screen.findByRole('button', { name: 'Contents' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Chapter 40' }));
     await waitFor(() => expect(state.streamStarts.at(-1)).toBe(38));
